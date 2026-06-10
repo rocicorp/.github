@@ -1,0 +1,56 @@
+# Org-wide required workflow (enforced via org ruleset "workflows" rule).
+# Auto-requests one reviewer on every PR (round-robin by PR number, never the
+# author). Always passes — review approval is NOT a merge gate by design;
+# rocicorp does post-commit review. This just guarantees someone is assigned.
+#
+# Lives in rocicorp/.github. Edit REVIEWER_POOL below to change the rotation.
+name: Auto-assign reviewer
+
+on:
+  pull_request:
+
+permissions:
+  pull-requests: write
+
+env:
+  REVIEWER_POOL: 0xcadams aboodman arv cesara darkgnotic grgbkr tantaman
+
+jobs:
+  assign:
+    name: Reviewer assigned
+    runs-on: ubuntu-latest
+    if: '!github.event.pull_request.draft'
+    steps:
+      - name: Request a reviewer if none
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            try {
+              if ((pr.requested_reviewers?.length ?? 0) + (pr.requested_teams?.length ?? 0) > 0) {
+                core.info('Reviewer already requested.');
+                return;
+              }
+              const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number,
+              });
+              if (reviews.some(r => r.user?.login !== pr.user?.login)) {
+                core.info('Review already submitted.');
+                return;
+              }
+              if (pr.head.repo?.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+                core.info('Fork PR: token is read-only, skipping auto-assign.');
+                return;
+              }
+              const pool = process.env.REVIEWER_POOL.split(/\s+/).filter(u => u && u !== pr.user?.login);
+              if (pool.length === 0) { core.info('No eligible reviewer.'); return; }
+              const reviewer = pool[pr.number % pool.length];
+              await github.rest.pulls.requestReviewers({
+                owner: context.repo.owner, repo: context.repo.repo,
+                pull_number: pr.number, reviewers: [reviewer],
+              });
+              core.info(`Requested review from ${reviewer}.`);
+            } catch (e) {
+              // Never block a merge on assignment plumbing.
+              core.warning(`Auto-assign failed (non-fatal): ${e.message}`);
+            }
