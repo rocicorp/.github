@@ -3,11 +3,17 @@
 # author). Always passes — review approval is NOT a merge gate by design;
 # rocicorp does post-commit review. This just guarantees someone is assigned.
 #
+# Because it's a required workflow, it must also subscribe to merge_group:
+# otherwise the required "Reviewer assigned" check never runs in the merge
+# queue and the entry stalls at "Expected — Waiting for workflow to run" until
+# the queue times out. On merge_group there's no PR, so it no-ops and passes.
+#
 # Lives in rocicorp/.github. Edit REVIEWER_POOL below to change the rotation.
 name: Auto-assign reviewer
 
 on:
   pull_request:
+  merge_group:
 
 permissions:
   pull-requests: write
@@ -26,6 +32,11 @@ jobs:
         with:
           script: |
             const pr = context.payload.pull_request;
+            if (!pr) {
+              // merge_group (or any non-PR) event: nothing to assign, just pass.
+              core.info('No pull_request payload; nothing to assign.');
+              return;
+            }
             try {
               if ((pr.requested_reviewers?.length ?? 0) + (pr.requested_teams?.length ?? 0) > 0) {
                 core.info('Reviewer already requested.');
