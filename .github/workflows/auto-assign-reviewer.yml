@@ -31,6 +31,10 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
+            if (context.eventName === 'merge_group') {
+              core.info('merge_group event: nothing to assign.');
+              return;
+            }
             const pr = context.payload.pull_request;
             if (!pr) {
               // merge_group (or any non-PR) event: nothing to assign, just pass.
