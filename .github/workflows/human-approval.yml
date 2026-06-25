@@ -67,10 +67,41 @@ jobs:
               (login ?? '').toLowerCase().endsWith('[bot]') ||
               AGENT_LOGINS.has((login ?? '').toLowerCase());
 
-            // A "@roci.dev human": an org owner/member who is not an agent.
+            // A "@roci.dev human": a non-agent with write access to this repo.
+            //
+            // `author_association` alone is unreliable: for PRs opened from a
+            // fork, and for members whose org membership is private, GitHub
+            // often reports CONTRIBUTOR/NONE instead of MEMBER. Relying on it
+            // wrongly gates real humans (e.g. a PR from a personal fork). So
+            // treat OWNER/MEMBER as a fast path, but otherwise confirm via the
+            // repo collaborator-permission API, which reflects the effective
+            // permission a user has through org/team membership.
             const TRUSTED_ASSOC = new Set(['OWNER', 'MEMBER']);
-            const isRociHuman = (login, type, association) =>
-              !isAgent(login, type) && TRUSTED_ASSOC.has(association);
+            const TRUSTED_PERMS = new Set(['admin', 'write']); // 'write' includes 'maintain'
+
+            const hasWriteAccess = async (login) => {
+              if (!login) return false;
+              try {
+                const { data } =
+                  await github.rest.repos.getCollaboratorPermissionLevel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    username: login,
+                  });
+                return TRUSTED_PERMS.has(data.permission);
+              } catch (error) {
+                core.info(
+                  `Could not resolve repo permission for @${login}: ${error.message}`,
+                );
+                return false;
+              }
+            };
+
+            const isRociHuman = async (login, type, association) => {
+              if (isAgent(login, type)) return false;
+              if (TRUSTED_ASSOC.has(association)) return true;
+              return hasWriteAccess(login);
+            };
 
             const isChecksApiPermissionError = (error) =>
               error?.status === 403 ||
@@ -148,7 +179,7 @@ jobs:
             const author = pr.user?.login ?? '';
 
             // 1. Author is a @roci.dev human -> green, no approval needed.
-            if (isRociHuman(author, pr.user?.type, pr.author_association)) {
+            if (await isRociHuman(author, pr.user?.type, pr.author_association)) {
               await writeCheck({
                 conclusion: 'success',
                 title: 'Authored by a roci.dev human',
@@ -196,12 +227,19 @@ jobs:
               }
             }
 
-            const approvers = [...latestByUser.values()].filter(
+            const candidateApprovers = [...latestByUser.values()].filter(
               r =>
                 r.state === 'APPROVED' &&
-                r.user?.login?.toLowerCase() !== author.toLowerCase() &&
-                isRociHuman(r.user?.login, r.user?.type, r.author_association),
+                r.user?.login?.toLowerCase() !== author.toLowerCase(),
             );
+            const approvers = [];
+            for (const r of candidateApprovers) {
+              if (
+                await isRociHuman(r.user?.login, r.user?.type, r.author_association)
+              ) {
+                approvers.push(r);
+              }
+            }
 
             if (approvers.length) {
               const who = approvers.map(r => `@${r.user.login}`).join(', ');
