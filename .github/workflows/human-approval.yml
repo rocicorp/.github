@@ -3,9 +3,12 @@ name: Human Approval
 # Org-wide required workflow (enforced via org ruleset "workflows" rule).
 # Gate that prevents agent (bot) identities from landing changes unilaterally.
 #
-# Publishes a `human/approval` check that is green when EITHER:
-#   - the PR author is a @roci.dev human (org OWNER/MEMBER, not an agent), OR
-#   - a @roci.dev human other than the author has an active approving review.
+# A "@roci.dev human" is an explicit allowlist of org-member logins
+# (HUMAN_POOL below). Publishes a `human/approval` check that is green when
+# EITHER:
+#   - the PR author is on the allowlist, OR
+#   - a human on the allowlist (other than the author) has an active approving
+#     review.
 #
 # This is a *check*, not a required review, so it never blocks human-authored
 # PRs (post-commit review stays intact). It only gates agent-authored PRs,
@@ -22,7 +25,7 @@ name: Human Approval
 # this to be enforced. This job always exits green; the verdict is the check
 # run it creates via the Checks API.
 #
-# Lives in rocicorp/.github. Edit AGENT_LOGINS below to add machine accounts.
+# Lives in rocicorp/.github. Edit HUMAN_POOL below to change the allowlist.
 
 on:
   pull_request:
@@ -32,6 +35,11 @@ on:
   merge_group:
 
 permissions: {}
+
+# Allowlist of @roci.dev human org-member logins. Mirrors REVIEWER_POOL in
+# auto-assign-reviewer.yml; keep the two in sync as the team changes.
+env:
+  HUMAN_POOL: 0xcadams aboodman arv cesara darkgnotic grgbkr tantaman
 
 concurrency:
   group: '${{ github.workflow }} @ ${{ github.event.pull_request.number || github.event.merge_group.head_sha }}'
@@ -52,56 +60,23 @@ jobs:
           script: |
             const CHECK_NAME = 'human/approval';
 
-            // Agent / bot identities that must never satisfy the gate on their
-            // own. `type === 'Bot'` covers GitHub App identities (e.g.
-            // claude[bot]); add any dedicated machine-account logins here.
-            const AGENT_LOGINS = new Set(
-              [
-                // 'claude[bot]',
-                // 'chatgpt-codex-connector[bot]',
-              ].map(s => s.toLowerCase()),
+            // A "@roci.dev human" is an explicit allowlist of org-member logins
+            // (HUMAN_POOL env, mirroring REVIEWER_POOL in auto-assign-reviewer).
+            //
+            // Trust is keyed on the GitHub account and nothing else. We do NOT
+            // infer it from repo permission or commit email: a bot or machine
+            // user can hold write access, and commit email is attacker-set, but
+            // neither can put itself on this list. So an agent can never satisfy
+            // the gate on its own regardless of the access it's been granted.
+            const HUMAN_POOL = new Set(
+              (process.env.HUMAN_POOL ?? '')
+                .split(/\s+/)
+                .filter(Boolean)
+                .map(s => s.toLowerCase()),
             );
 
-            const isAgent = (login, type) =>
-              type === 'Bot' ||
-              (login ?? '').toLowerCase().endsWith('[bot]') ||
-              AGENT_LOGINS.has((login ?? '').toLowerCase());
-
-            // A "@roci.dev human": a non-agent with write access to this repo.
-            //
-            // `author_association` alone is unreliable: for PRs opened from a
-            // fork, and for members whose org membership is private, GitHub
-            // often reports CONTRIBUTOR/NONE instead of MEMBER. Relying on it
-            // wrongly gates real humans (e.g. a PR from a personal fork). So
-            // treat OWNER/MEMBER as a fast path, but otherwise confirm via the
-            // repo collaborator-permission API, which reflects the effective
-            // permission a user has through org/team membership.
-            const TRUSTED_ASSOC = new Set(['OWNER', 'MEMBER']);
-            const TRUSTED_PERMS = new Set(['admin', 'write']); // 'write' includes 'maintain'
-
-            const hasWriteAccess = async (login) => {
-              if (!login) return false;
-              try {
-                const { data } =
-                  await github.rest.repos.getCollaboratorPermissionLevel({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    username: login,
-                  });
-                return TRUSTED_PERMS.has(data.permission);
-              } catch (error) {
-                core.info(
-                  `Could not resolve repo permission for @${login}: ${error.message}`,
-                );
-                return false;
-              }
-            };
-
-            const isRociHuman = async (login, type, association) => {
-              if (isAgent(login, type)) return false;
-              if (TRUSTED_ASSOC.has(association)) return true;
-              return hasWriteAccess(login);
-            };
+            const isRociHuman = (login) =>
+              HUMAN_POOL.has((login ?? '').toLowerCase());
 
             const isChecksApiPermissionError = (error) =>
               error?.status === 403 ||
@@ -179,11 +154,11 @@ jobs:
             const author = pr.user?.login ?? '';
 
             // 1. Author is a @roci.dev human -> green, no approval needed.
-            if (await isRociHuman(author, pr.user?.type, pr.author_association)) {
+            if (isRociHuman(author)) {
               await writeCheck({
                 conclusion: 'success',
                 title: 'Authored by a roci.dev human',
-                summary: `PR author @${author} is a roci.dev org member.`,
+                summary: `PR author @${author} is on the roci.dev allowlist.`,
               });
               return;
             }
@@ -227,19 +202,12 @@ jobs:
               }
             }
 
-            const candidateApprovers = [...latestByUser.values()].filter(
+            const approvers = [...latestByUser.values()].filter(
               r =>
                 r.state === 'APPROVED' &&
-                r.user?.login?.toLowerCase() !== author.toLowerCase(),
+                r.user?.login?.toLowerCase() !== author.toLowerCase() &&
+                isRociHuman(r.user?.login),
             );
-            const approvers = [];
-            for (const r of candidateApprovers) {
-              if (
-                await isRociHuman(r.user?.login, r.user?.type, r.author_association)
-              ) {
-                approvers.push(r);
-              }
-            }
 
             if (approvers.length) {
               const who = approvers.map(r => `@${r.user.login}`).join(', ');
