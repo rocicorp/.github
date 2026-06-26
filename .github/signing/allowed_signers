@@ -1,0 +1,39 @@
+# SSH keys allowed to sign commits for Rocicorp pull requests.
+#
+# This file is consumed by the Signed Commit Authors workflow in rocicorp/mono.
+# It uses Git's gpg.ssh.allowedSignersFile / OpenSSH allowed_signers format.
+#
+# Each active line authorizes one public key:
+#
+#   <signer-principal> namespaces="git" <ssh-key-type> <base64-public-key> <comment>
+#
+# Example:
+#
+#   alice@example.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... alice-laptop-2026
+#
+# Notes:
+#
+# - Add public keys only. Never add private keys.
+# - Keep namespaces="git" so the key is scoped to Git SSH signatures.
+# - The principal should match the identity the signer uses for Git commit
+#   signing, commonly their GitHub noreply email or work email.
+# - OpenSSH validity options such as valid-after and valid-before can be used
+#   during key rotation, for example:
+#
+#     alice@example.com namespaces="git",valid-after="2026-01-01T00:00:00Z" ssh-ed25519 AAAAC3... alice-laptop-2026
+#
+# ========================================================================
+# TEAM ACTION REQUIRED
+#
+# Add the team's SSH commit-signing PUBLIC KEYS below this block.
+#
+# The allow-list is intentionally empty for now because the public keys are
+# not available at the time this file is being added. Until at least one
+# non-comment allowed_signers entry is added below, the signed-commit-author
+# workflow will download this file successfully but reject every PR commit.
+#
+# Put one key per line below, using the format shown above.
+# ========================================================================
+#
+# ADD TEAM PUBLIC KEYS BELOW THIS LINE:
+#
