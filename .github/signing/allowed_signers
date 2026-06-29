@@ -1,6 +1,7 @@
 # SSH keys allowed to sign commits for Rocicorp pull requests.
 #
-# This file is consumed by the Signed Commit Authors workflow in rocicorp/mono.
+# This file is consumed by the Verify Signed Commit Authors action in this
+# repository.
 # It uses Git's gpg.ssh.allowedSignersFile / OpenSSH allowed_signers format.
 #
 # Each active line authorizes one public key:
@@ -30,7 +31,7 @@
 # The allow-list is intentionally empty for now because the public keys are
 # not available at the time this file is being added. Until at least one
 # non-comment allowed_signers entry is added below, the signed-commit-author
-# workflow will download this file successfully but reject every PR commit.
+# action will find this file successfully but reject every PR commit.
 #
 # Put one key per line below, using the format shown above.
 # ========================================================================

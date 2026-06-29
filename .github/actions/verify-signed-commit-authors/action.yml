@@ -1,0 +1,17 @@
+name: Verify Signed Commit Authors
+description: Verify that every pull request commit is SSH-signed by an allowed key.
+
+inputs:
+  github-token:
+    description: Token with contents:read access to fetch pull request commits.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Verify signed commit authors
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        SIGNED_COMMIT_ACTION_PATH: ${{ github.action_path }}
+      run: node "$SIGNED_COMMIT_ACTION_PATH/verify-signed-commit-authors.mjs"

@@ -1,0 +1,30 @@
+name: Verify Signed Commit Authors Action
+
+on:
+  pull_request:
+    paths:
+      - '.github/actions/verify-signed-commit-authors/**'
+      - '.github/signing/allowed_signers'
+      - '.github/workflows/verify-signed-commit-authors-action.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/actions/verify-signed-commit-authors/**'
+      - '.github/signing/allowed_signers'
+      - '.github/workflows/verify-signed-commit-authors-action.yml'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  test:
+    name: Test verifier
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out action
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run verifier tests
+        run: node --test .github/actions/verify-signed-commit-authors/verify-signed-commit-authors.test.mjs
