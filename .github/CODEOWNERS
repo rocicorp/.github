@@ -1,0 +1,11 @@
+# Require signing-policy changes to be reviewed by the policy owners.
+#
+# For this to enforce review, repository admins must enable "Require review
+# from Code Owners" in the main branch ruleset or branch protection rule.
+#
+# The team below must exist and have explicit write access to this repository.
+# Update it if the GitHub team uses a different slug.
+
+.github/actions/verify-signed-commit-authors/ @arv @0xcadams @aboodman @tantaman @darkgnotic @cesara @grgbkr
+.github/signing/allowed_signers @arv @0xcadams @aboodman @tantaman @darkgnotic @cesara @grgbkr
+.github/workflows/verify-signed-commit-authors-action.yml @arv @0xcadams @aboodman @tantaman @darkgnotic @cesara @grgbkr
