@@ -2,6 +2,10 @@ name: Verify Signed Commit Authors
 description: Verify that every pull request commit is SSH-signed by an allowed key.
 
 inputs:
+  enforce:
+    description: Whether signature verification failures should fail the workflow.
+    default: 'true'
+    required: false
   github-token:
     description: Token with contents:read access to fetch pull request commits.
     required: true
@@ -14,4 +18,5 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         SIGNED_COMMIT_ACTION_PATH: ${{ github.action_path }}
+        SIGNED_COMMIT_ENFORCE: ${{ inputs.enforce }}
       run: node "$SIGNED_COMMIT_ACTION_PATH/verify-signed-commit-authors.mjs"

@@ -96,6 +96,18 @@ test('rejects an allowed signers file with no active keys', () => {
   assert.match(result.stdout, /has no active signing keys/);
 });
 
+test('warn-only mode logs failures without failing the workflow', () => {
+  const result = runVerifier({
+    allowedSigners: '# no active keys yet\n',
+    env: {
+      SIGNED_COMMIT_ENFORCE: 'false',
+    },
+  });
+
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /::warning::.*has no active signing keys/);
+});
+
 function runVerifier({allowedSigners = activeAllowedSigners, env = {}} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'verify-signed-commit-authors-test-'));
   tempDirs.push(dir);

@@ -9,14 +9,18 @@ const FULL_SHA_PATTERN = /^[0-9a-fA-F]{40}$/;
 const INTEGER_PATTERN = /^[0-9]+$/;
 const LINE_SPLIT_PATTERN = /\r?\n/;
 
+const enforce = process.env.SIGNED_COMMIT_ENFORCE !== 'false';
+
 try {
   main();
 } catch (error) {
   workflowCommand(
-    'error',
+    enforce ? 'error' : 'warning',
     error instanceof Error ? error.message : String(error),
   );
-  process.exitCode = 1;
+  if (enforce) {
+    process.exitCode = 1;
+  }
 }
 
 function main() {
