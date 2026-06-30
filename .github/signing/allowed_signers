@@ -38,3 +38,5 @@
 #
 # ADD TEAM PUBLIC KEYS BELOW THIS LINE:
 #
+
+greg@roci.dev namespaces="git",valid-after="2026-06-30T00:00:00Z" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII8uJctHtCsGhNAOUKEdRkhEWoTjLJPe8tjs+sXbYSJC greg-new-mac-2026 
