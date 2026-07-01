@@ -38,3 +38,5 @@
 #
 # ADD TEAM PUBLIC KEYS BELOW THIS LINE:
 #
+
+arv@roci.dev namespaces="git",valid-after="2026-07-01T09:00:00Z" ssh-ed25519 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBSXMQ1oBIet6Xf9S/Bqdd6bRV0Z8TiyVn2JAMvmO5cj arv-new-mac-2026 
