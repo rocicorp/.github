@@ -1,0 +1,157 @@
+# Org-wide required workflow enforced by the org ruleset "workflows" rule.
+#
+# Runs Codex Security on trusted same-repository PRs. Fork PRs and PRs from
+# external authors are intentionally skipped because the review uses
+# OPENAI_API_KEY.
+#
+# Because this can be required by merge queues, it subscribes to merge_group.
+# The actual security review runs on pull_request before queue entry; merge_group
+# no-ops and passes.
+name: Codex Security Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+
+permissions: {}
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.run_id }}'
+  cancel-in-progress: true
+
+jobs:
+  security-review:
+    name: Review PR for Security Regressions
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'merge_group' ||
+      (
+        github.event_name == 'pull_request' &&
+        !github.event.pull_request.draft &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
+      )
+    permissions:
+      contents: read
+    outputs:
+      final-message: ${{ steps.run-codex.outputs.final-message }}
+    env:
+      CODEX_HOME: ${{ runner.temp }}/codex-home
+      CODEX_INSTALL_DIR: ${{ runner.temp }}/codex-bin
+      CODEX_NON_INTERACTIVE: '1'
+      CODEX_SECURITY_MARKETPLACE_REF: d6169bef126ba46677c011ed4beb0754171394f9
+      TMPDIR: ${{ runner.temp }}/codex-security
+    steps:
+      - name: Merge group no-op
+        if: github.event_name == 'merge_group'
+        run: |
+          echo "merge_group event: security review runs on pull_request before entering the queue."
+
+      - name: Install Codex Security plugin
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$CODEX_HOME" "$CODEX_INSTALL_DIR" "$TMPDIR"
+          curl -fsSL https://chatgpt.com/codex/install.sh | sh
+          echo "$CODEX_INSTALL_DIR" >> "$GITHUB_PATH"
+
+          git clone --filter=blob:none https://github.com/openai/plugins.git "$RUNNER_TEMP/openai-plugins"
+          git -C "$RUNNER_TEMP/openai-plugins" checkout "$CODEX_SECURITY_MARKETPLACE_REF"
+
+          # Use the API-key marketplace manifest because codex-action runs with
+          # API auth. openai-* marketplace names are reserved, so use a local CI
+          # alias for this pinned checkout.
+          cp "$RUNNER_TEMP/openai-plugins/.agents/plugins/api_marketplace.json" \
+            "$RUNNER_TEMP/openai-plugins/.agents/plugins/marketplace.json"
+          perl -0pi -e 's/"name": "openai-api-curated"/"name": "openai-plugins-ci"/' \
+            "$RUNNER_TEMP/openai-plugins/.agents/plugins/marketplace.json"
+
+          "$CODEX_INSTALL_DIR/codex" plugin marketplace add "$RUNNER_TEMP/openai-plugins" --json
+          "$CODEX_INSTALL_DIR/codex" plugin add codex-security@openai-plugins-ci --json
+          "$CODEX_INSTALL_DIR/codex" plugin list --json | grep -q '"pluginId": "codex-security@openai-plugins-ci"'
+
+      - name: Checkout pull request head
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run Codex Security review
+        id: run-codex
+        if: github.event_name == 'pull_request'
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-home: ${{ env.CODEX_HOME }}
+          sandbox: workspace-write
+          output-file: ${{ runner.temp }}/codex-security-review.md
+          prompt: |
+            Use $codex-security:security-diff-scan to review changes from ${{ github.event.pull_request.base.sha }} to ${{ github.event.pull_request.head.sha }} for security regressions.
+
+            Do not modify the checkout. Focus on authentication, authorization,
+            input validation, SQL and query construction, filesystem access,
+            network requests, secrets, sync protocol boundaries, and GitHub
+            Actions changes.
+
+            Return the findings summary, reviewed surfaces, deferred coverage,
+            open questions, and the final report path. If there are no findings,
+            say that clearly and note any residual coverage gaps.
+
+  post-feedback:
+    name: Post Security Review
+    runs-on: ubuntu-latest
+    needs: security-review
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.security-review.outputs.final-message != ''
+    permissions:
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Post or update PR comment
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          CODEX_FINAL_MESSAGE: ${{ needs.security-review.outputs.final-message }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const marker = '<!-- codex-security-review -->';
+            const body = [
+              marker,
+              '## Codex Security Review',
+              '',
+              process.env.CODEX_FINAL_MESSAGE,
+            ].join('\n');
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+
+            const previous = comments.find(
+              comment =>
+                comment.user?.type === 'Bot' &&
+                comment.body?.includes(marker),
+            );
+
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: previous.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body,
+              });
+            }

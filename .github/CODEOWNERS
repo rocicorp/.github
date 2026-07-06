@@ -8,5 +8,6 @@
 
 .github/actions/verify-signed-commit-authors/ @arv @0xcadams @aboodman @tantaman @darkgnotic @cesara @grgbkr
 .github/signing/allowed_signers @arv @0xcadams @aboodman @tantaman @darkgnotic @cesara @grgbkr
+.github/workflows/codex-security-review.yml @arv @0xcadams @aboodman @tantaman @darkgnotic @cesara @grgbkr
 .github/workflows/verify-signed-commit-authors-action.yml @arv @0xcadams @aboodman @tantaman @darkgnotic @cesara @grgbkr
 .github/workflows/signed-commit-authors.yml @arv @0xcadams @aboodman @tantaman @darkgnotic @cesara @grgbkr
