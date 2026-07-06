@@ -8,11 +8,8 @@
 # The verifier needs a pull_request payload, so merge_group no-ops and passes.
 name: Signed Commit Authors
 
-'on':
+on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
-  merge_group:
-    types: [checks_requested]
 
 permissions: {}
 
