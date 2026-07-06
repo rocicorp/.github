@@ -10,7 +10,9 @@ name: Signed Commit Authors
 
 on:
   pull_request_target:
+    types: [opened, synchronize, reopened]
   merge_group:
+    types: [checks_requested]
 
 permissions: {}
 
