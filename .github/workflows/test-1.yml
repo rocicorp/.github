@@ -1,7 +1,0 @@
-name: Test 1
-on: [pull_request, merge_group]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "test 1"
