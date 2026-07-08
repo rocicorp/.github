@@ -1,0 +1,11 @@
+name: Test 4
+on:
+  pull_request:
+    paths:
+      - '.github/**'
+  merge_group:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "test 4"
