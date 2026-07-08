@@ -38,7 +38,7 @@ jobs:
 
       - name: Verify signed commit authors
         if: github.event_name == 'pull_request'
-        uses: rocicorp/.github/.github/actions/verify-signed-commit-authors@6bcd1f796546a89033dd5b3c135481ab5b56583a
+        uses: rocicorp/.github/.github/actions/verify-signed-commit-authors@29499bd9fefbd3fdf60bdd216707992d727dcf01
         with:
           enforce: false # Temporary until allowed_signers is populated.
           github-token: ${{ github.token }}
