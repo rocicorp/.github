@@ -1,11 +1,25 @@
 name: Test 4
-on:
-  pull_request:
-    paths:
-      - '.github/**'
-  merge_group:
+
+on: [pull_request, merge_group]
+
+permissions: {}
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.run_id }}'
+  cancel-in-progress: true
+
 jobs:
-  test:
+  verify:
+    name: Verify Signed Commit Authors
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - run: echo "test 4"
+      - name: Merge group no-op
+        if: github.event_name == 'merge_group'
+        run: echo "merge_group event"
+
+      - name: Dummy steps
+        run: |
+          echo "Simulate checkout base"
+          echo "Simulate verify signed commit authors"

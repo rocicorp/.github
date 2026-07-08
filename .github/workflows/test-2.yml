@@ -1,11 +1,30 @@
 name: Test 2
-on:
-  pull_request:
-    branches:
-      - '*'
-  merge_group:
+
+on: [pull_request, merge_group]
+
+permissions: {}
+
 jobs:
-  test:
+  verify:
+    name: Verify Signed Commit Authors
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - run: echo "test 2"
+      - name: Merge group no-op
+        if: github.event_name == 'merge_group'
+        run: echo "merge_group event"
+
+      - name: Check out trusted base
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Verify signed commit authors
+        if: github.event_name == 'pull_request'
+        uses: rocicorp/.github/.github/actions/verify-signed-commit-authors@main
+        with:
+          enforce: false
+          github-token: ${{ github.token }}
