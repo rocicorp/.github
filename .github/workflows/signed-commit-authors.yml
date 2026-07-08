@@ -10,6 +10,7 @@ name: Signed Commit Authors
 
 on:
   pull_request:
+  merge_group:
 
 permissions: {}
 
@@ -29,14 +30,14 @@ jobs:
         run: echo "merge_group event: pull request commits are verified before entering the queue."
 
       - name: Check out trusted base
-        if: github.event_name == 'pull_request_target'
+        if: github.event_name == 'pull_request'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
       - name: Verify signed commit authors
-        if: github.event_name == 'pull_request_target'
+        if: github.event_name == 'pull_request'
         uses: rocicorp/.github/.github/actions/verify-signed-commit-authors@main # zizmor: ignore[unpinned-uses] Cross-repo staging branch; pin after the shared workflow lands.
         with:
           enforce: false # Temporary until allowed_signers is populated.
