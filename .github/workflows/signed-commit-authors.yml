@@ -9,7 +9,7 @@
 name: Signed Commit Authors
 
 on:
-  pull_request_target:
+  pull_request:
 
 permissions: {}
 
