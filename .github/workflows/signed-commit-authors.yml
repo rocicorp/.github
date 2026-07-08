@@ -9,8 +9,9 @@
 name: Signed Commit Authors
 
 on:
-  pull_request: {}
-  merge_group: {}
+  pull_request:
+    branches: ['**']
+  merge_group:
 
 permissions: {}
 
