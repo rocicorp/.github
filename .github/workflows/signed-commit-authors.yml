@@ -21,7 +21,7 @@ jobs:
     steps:
       - name: Merge group no-op
         if: github.event_name == 'merge_group'
-        run: echo "merge_group event: pull request commits are verified before entering the queue."
+        run: echo "merge_group event - pull request commits are verified before entering the queue"
 
       - name: Check out trusted base
         if: github.event_name == 'pull_request'
