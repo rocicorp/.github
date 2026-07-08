@@ -1,7 +1,42 @@
-name: Test 1
+# Org-wide required workflow enforced by the org ruleset "workflows" rule.
+#
+# The verifier and SSH signing policy live in rocicorp/.github. Configure repo
+# and branch targeting in the ruleset; required workflow event filters such as
+# branches, paths, and types are ignored by GitHub.
+#
+# Because this is a required workflow, it must subscribe to merge_group too.
+# The verifier needs a pull_request payload, so merge_group no-ops and passes.
+name: Signed Commit Authors
+
 on: [pull_request, merge_group]
+
+permissions: {}
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.run_id }}'
+  cancel-in-progress: true
+
 jobs:
-  test:
+  verify:
+    name: Verify Signed Commit Authors
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # Required to checkout trusted base code and fetch commits.
     steps:
-      - run: echo "test 1"
+      - name: Merge group no-op
+        if: github.event_name == 'merge_group'
+        run: echo "merge_group event: pull request commits are verified before entering the queue."
+
+      - name: Check out trusted base
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Verify signed commit authors
+        if: github.event_name == 'pull_request'
+        uses: rocicorp/.github/.github/actions/verify-signed-commit-authors@main # zizmor: ignore[unpinned-uses] Cross-repo staging branch; pin after the shared workflow lands.
+        with:
+          enforce: false # Temporary until allowed_signers is populated.
+          github-token: ${{ github.token }}
