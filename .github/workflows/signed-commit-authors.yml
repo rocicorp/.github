@@ -38,7 +38,7 @@ jobs:
 
       - name: Verify signed commit authors
         if: github.event_name == 'pull_request'
-        uses: rocicorp/.github/.github/actions/verify-signed-commit-authors@main # zizmor: ignore[unpinned-uses] Cross-repo staging branch; pin after the shared workflow lands.
+        uses: rocicorp/.github/.github/actions/verify-signed-commit-authors@6bcd1f796546a89033dd5b3c135481ab5b56583a
         with:
           enforce: false # Temporary until allowed_signers is populated.
           github-token: ${{ github.token }}
