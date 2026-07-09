@@ -23,18 +23,11 @@ jobs:
     name: Verify Signed Commit Authors
     runs-on: ubuntu-latest
     permissions:
-      contents: read # Required to checkout trusted base code and fetch commits.
+      contents: read # Required to fetch commits.
     steps:
       - name: Merge group no-op
         if: github.event_name == 'merge_group'
         run: echo "merge_group event - pull request commits are verified before entering the queue"
-
-      - name: Check out trusted base
-        if: github.event_name == 'pull_request'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          persist-credentials: false
 
       - name: Verify signed commit authors
         if: github.event_name == 'pull_request'

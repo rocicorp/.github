@@ -152,6 +152,7 @@ function runVerifier({allowedSigners = activeAllowedSigners, env = {}} = {}) {
     encoding: 'utf8',
     env: {
       GITHUB_EVENT_PATH: eventPath,
+      GITHUB_REPOSITORY: 'rocicorp/.github',
       GITHUB_TOKEN: 'github-token',
       GITHUB_WORKSPACE: workspace,
       PATH: `${binDir}${delimiter}${process.env.PATH ?? ''}`,
@@ -181,6 +182,14 @@ appendFileSync(
 
 const args = stripConfigArgs(allArgs);
 const command = args[0];
+
+if (command === 'init') {
+  process.exit(0);
+}
+
+if (command === 'remote' && args[1] === 'add') {
+  process.exit(0);
+}
 
 if (command === 'fetch') {
   process.exit(0);
