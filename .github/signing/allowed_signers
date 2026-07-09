@@ -17,7 +17,7 @@
 # - Add public keys only. Never add private keys.
 # - Keep namespaces="git" so the key is scoped to Git SSH signatures.
 # - The principal should match the identity the signer uses for Git commit
-#   signing, commonly their GitHub noreply email or work email.
+#   signing, commonly their GitHub noreply email or work email.ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH+lMHRRdcZT8fGbWwQNCuTvXBv49Mp0pCNzM85guGN+
 # - OpenSSH validity options such as valid-after and valid-before can be used
 #   during key rotation, for example:
 #
@@ -39,8 +39,9 @@
 # ADD TEAM PUBLIC KEYS BELOW THIS LINE:
 #
 
-greg@roci.dev namespaces="git",valid-after="20260707" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAiOsX/hyYIEVIJX4fO0spMlh9tSXqMWJ6LwyVBZu5Ls greg-new-mac-2026
+aa@roci.dev namespaces="git",valid-after="20260708" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH+lMHRRdcZT8fGbWwQNCuTvXBv49Mp0pCNzM85guGN+ aa-new-mac-2026
 arv@roci.dev namespaces="git",valid-after="20260701" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBSXMQ1oBIet6Xf9S/Bqdd6bRV0Z8TiyVn2JAMvmO5cj arv-new-mac-2026
 chase@roci.dev namespaces="git",valid-after="20260701" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBaObZrJF4AbqfGLAWgmXPfF1tXYp6cuXIjAsTAKwlpd chase-new-mac-2026
-mlaw@roci.dev namespaces="git",valid-after="20260701" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP4K3oqdHhKA3zwCo+KK80L7XclYCwgXiylaNuNbasYo matt-new-mac-2026
 d@roci.dev namespaces="git",valid-after="20260707" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBbNqV94EUcC3bf0j+B6AAFMjkEYkUZ7YBTvh1TAnItd darick-new-mac-2026
+greg@roci.dev namespaces="git",valid-after="20260707" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAiOsX/hyYIEVIJX4fO0spMlh9tSXqMWJ6LwyVBZu5Ls greg-new-mac-2026
+mlaw@roci.dev namespaces="git",valid-after="20260701" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP4K3oqdHhKA3zwCo+KK80L7XclYCwgXiylaNuNbasYo matt-new-mac-2026
