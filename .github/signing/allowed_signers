@@ -8,6 +8,8 @@
 #
 #   <signer-principal> namespaces="git" <ssh-key-type> <base64-public-key> <comment>
 #
+# test
+#
 # Example:
 #
 #   alice@example.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... alice-laptop-2026
