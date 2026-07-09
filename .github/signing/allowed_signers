@@ -41,6 +41,7 @@
 
 aa@roci.dev namespaces="git",valid-after="20260708" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFq/gXedDlqUPHobZzm9VTzcZTwwf78oDJJFDZ1ev3KL aa-greybook-2026
 arv@roci.dev namespaces="git",valid-after="20260701" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBSXMQ1oBIet6Xf9S/Bqdd6bRV0Z8TiyVn2JAMvmO5cj arv-new-mac-2026
+cesar@roci.dev namespaces="git",valid-after="20260701" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINdgtuMD+cq/AmdHi/Nu1VeLjee7zA36gXyDiR+i9Y/x cesar-new-mac-2026
 chase@roci.dev namespaces="git",valid-after="20260701" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBaObZrJF4AbqfGLAWgmXPfF1tXYp6cuXIjAsTAKwlpd chase-new-mac-2026
 d@roci.dev namespaces="git",valid-after="20260707" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBbNqV94EUcC3bf0j+B6AAFMjkEYkUZ7YBTvh1TAnItd darick-new-mac-2026
 greg@roci.dev namespaces="git",valid-after="20260707" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAiOsX/hyYIEVIJX4fO0spMlh9tSXqMWJ6LwyVBZu5Ls greg-new-mac-2026
