@@ -41,6 +41,7 @@ function main() {
   );
 
   fetchPullRequestCommits({
+    prBaseSha,
     prCommitCount,
     prHeadSha,
     prNumber,
@@ -88,6 +89,7 @@ function countActiveSigners(allowedSignersPath) {
 }
 
 function fetchPullRequestCommits({
+  prBaseSha,
   prCommitCount,
   prHeadSha,
   prNumber,
@@ -97,6 +99,35 @@ function fetchPullRequestCommits({
   const authHeader = Buffer.from(`x-access-token:${token}`, 'utf8').toString(
     'base64',
   );
+
+  if (!existsSync(join(workspace, '.git'))) {
+    const init = git(['init'], workspace);
+    if (!init.ok) {
+      fail(`Could not initialize git repository: ${commandDetails(init)}`);
+    }
+    const remoteAdd = git(
+      ['remote', 'add', 'origin', `https://github.com/${requiredEnv('GITHUB_REPOSITORY')}`],
+      workspace,
+    );
+    if (!remoteAdd.ok) {
+      fail(`Could not add origin remote: ${commandDetails(remoteAdd)}`);
+    }
+  }
+
+  const fetchBase = git(
+    [
+      '-c',
+      `http.https://github.com/.extraheader=AUTHORIZATION: basic ${authHeader}`,
+      'fetch',
+      '--no-tags',
+      'origin',
+      prBaseSha,
+    ],
+    workspace,
+  );
+  if (!fetchBase.ok) {
+    fail(`Could not fetch PR base commit: ${commandDetails(fetchBase)}`);
+  }
 
   const fetch = git(
     [
