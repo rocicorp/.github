@@ -190,17 +190,17 @@ test('rejects run when neither pull_request payload nor head-sha is provided', (
   );
 });
 
-test('rejects mismatched head-sha on a pull request event', () => {
+test('rejects head-sha on a pull request event', () => {
   const result = runVerifier({
     env: {
-      SIGNED_COMMIT_HEAD_SHA: '4444444444444444444444444444444444444444',
+      SIGNED_COMMIT_HEAD_SHA: headSha,
     },
   });
 
   assert.equal(result.status, 1);
   assert.match(
     result.stdout,
-    /Cannot override target commit on a pull request/,
+    /::error::head-sha cannot be specified on a pull request event; commits are determined from the pull request payload\./,
   );
 });
 
@@ -279,6 +279,22 @@ test('resolves plain branch name through refs/heads/ or refs/remotes/origin/ eve
   assert.ok(
     revParseCalls.every(call => !call.args.includes('main^{commit}')),
     'Expected no git rev-parse call for bare ambiguous main^{commit}',
+  );
+});
+
+test('accepts uppercase head-sha in commit-range mode', () => {
+  const result = runVerifier({
+    env: {
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit.toUpperCase(),
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Checking 2 unmerged commit\(s\) between origin\/main \(111111111111\) and 333333333333\./,
   );
 });
 

@@ -35,9 +35,9 @@ function main() {
   const pr = tryReadPullRequestPayload();
   if (pr) {
     const rawHead = process.env.SIGNED_COMMIT_HEAD_SHA?.trim();
-    if (rawHead && rawHead !== pr.head?.sha) {
+    if (rawHead) {
       fail(
-        `head-sha (${rawHead}) does not match pull request head SHA (${pr.head?.sha}). Cannot override target commit on a pull request.`,
+        'head-sha cannot be specified on a pull request event; commits are determined from the pull request payload.',
       );
     }
 
@@ -554,11 +554,11 @@ function validateInteger(label, value) {
 }
 
 function validateSha(label, value) {
-  const text = String(value);
+  const text = String(value).trim();
   if (!FULL_SHA_PATTERN.test(text)) {
     fail(`Invalid ${label}: ${text}`);
   }
-  return text;
+  return text.toLowerCase();
 }
 
 function info(message) {
