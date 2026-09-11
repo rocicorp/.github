@@ -254,6 +254,34 @@ test('accepts fully qualified branch ref (e.g. "refs/heads/main") for base-ref',
   );
 });
 
+test('resolves plain branch name through refs/heads/ or refs/remotes/origin/ even if a tag has the same name', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_FAIL_REV_PARSE_REFS: 'main^{commit}',
+      SIGNED_COMMIT_BASE_REF: 'main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Checking 2 unmerged commit\(s\) between main \(111111111111\) and 333333333333\./,
+  );
+  const calls = readFileSync(join(result.dir, 'tool-calls.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line));
+  const revParseCalls = calls.filter(
+    call => call.command === 'git' && call.args[0] === 'rev-parse',
+  );
+  assert.ok(
+    revParseCalls.every(call => !call.args.includes('main^{commit}')),
+    'Expected no git rev-parse call for bare ambiguous main^{commit}',
+  );
+});
+
 test('unshallows repository in commit-range mode when shallow', () => {
   const result = runVerifier({
     env: {

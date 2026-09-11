@@ -201,7 +201,13 @@ function unshallowFromOrigin(workspace) {
 }
 
 function resolveBaseCommit(baseRef, workspace) {
-  let res = git(['rev-parse', '--verify', `${baseRef}^{commit}`], workspace);
+  const primaryRef =
+    FULL_SHA_PATTERN.test(baseRef) || baseRef.startsWith('refs/')
+      ? baseRef
+      : baseRef.startsWith('origin/')
+      ? `refs/remotes/${baseRef}`
+      : `refs/heads/${baseRef}`;
+  let res = git(['rev-parse', '--verify', `${primaryRef}^{commit}`], workspace);
   if (res.ok) {
     return {ok: true, sha: res.stdout.trim()};
   }
