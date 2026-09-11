@@ -25,14 +25,6 @@ try {
 
 function main() {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
-  const pr = readPullRequestPayload();
-  const prNumber = validateInteger('pull request number', pr.number);
-  const prCommitCount = validateInteger(
-    'pull request commit count',
-    pr.commits,
-  );
-  const prHeadSha = validateSha('pull request head SHA', pr.head?.sha);
-  const prBaseSha = validateSha('pull request base SHA', pr.base?.sha);
   const allowedSignersPath = getAllowedSignersPath();
 
   const activeSignerCount = countActiveSigners(allowedSignersPath);
@@ -40,31 +32,72 @@ function main() {
     `Checking signatures against ${activeSignerCount} allowed SSH key entr${activeSignerCount === 1 ? 'y' : 'ies'}.`,
   );
 
-  fetchPullRequestCommits({
-    prBaseSha,
-    prCommitCount,
-    prHeadSha,
-    prNumber,
-    workspace,
-  });
+  const pr = tryReadPullRequestPayload();
+  if (pr) {
+    const rawHead = process.env.SIGNED_COMMIT_HEAD_SHA?.trim();
+    if (rawHead && rawHead !== pr.head?.sha) {
+      fail(
+        `head-sha (${rawHead}) does not match pull request head SHA (${pr.head?.sha}). Cannot override target commit on a pull request.`,
+      );
+    }
 
-  info(`Checking ${prCommitCount} commit(s) on PR #${prNumber}.`);
-  verifyPullRequestCommits({
+    const prNumber = validateInteger('pull request number', pr.number);
+    const prCommitCount = validateInteger(
+      'pull request commit count',
+      pr.commits,
+    );
+    const prHeadSha = validateSha('pull request head SHA', pr.head?.sha);
+    const prBaseSha = validateSha('pull request base SHA', pr.base?.sha);
+
+    fetchPullRequestCommits({
+      prBaseSha,
+      prCommitCount,
+      prHeadSha,
+      prNumber,
+      workspace,
+    });
+
+    info(`Checking ${prCommitCount} commit(s) on PR #${prNumber}.`);
+    verifyPullRequestCommits({
+      allowedSignersPath,
+      expectedCommitCount: prCommitCount,
+      prBaseSha,
+      prHeadSha,
+      workspace,
+    });
+    return;
+  }
+
+  const rawHead = process.env.SIGNED_COMMIT_HEAD_SHA?.trim();
+  if (!rawHead) {
+    fail('No pull_request payload and no head-sha provided.');
+  }
+
+  const headSha = validateSha('head SHA', rawHead);
+  const baseRef = process.env.SIGNED_COMMIT_BASE_REF?.trim() || 'origin/main';
+  if (baseRef.startsWith('-')) {
+    fail(`Invalid base ref "${baseRef}": must not start with a dash.`);
+  }
+  const SAFE_REF_PATTERN = /^[0-9a-zA-Z._\/-]+$/;
+  if (!SAFE_REF_PATTERN.test(baseRef)) {
+    fail(`Invalid base ref "${baseRef}": contains invalid characters.`);
+  }
+
+  verifyCommitRange({
     allowedSignersPath,
-    expectedCommitCount: prCommitCount,
-    prBaseSha,
-    prHeadSha,
+    baseRef,
+    headSha,
     workspace,
   });
 }
 
-function readPullRequestPayload() {
-  const eventPath = requiredEnv('GITHUB_EVENT_PATH');
-  const payload = JSON.parse(readFileSync(eventPath, 'utf8'));
-  if (!payload.pull_request) {
-    fail('No pull_request payload.');
+function tryReadPullRequestPayload() {
+  const eventPath = process.env.GITHUB_EVENT_PATH;
+  if (!eventPath || !existsSync(eventPath)) {
+    return null;
   }
-  return payload.pull_request;
+  const payload = JSON.parse(readFileSync(eventPath, 'utf8'));
+  return payload.pull_request ?? null;
 }
 
 function getAllowedSignersPath() {
@@ -88,6 +121,75 @@ function countActiveSigners(allowedSignersPath) {
   return activeSignerLines.length;
 }
 
+function ensureGitRepository(workspace) {
+  if (!existsSync(join(workspace, '.git'))) {
+    const init = git(['init'], workspace);
+    if (!init.ok) {
+      fail(`Could not initialize git repository: ${commandDetails(init)}`);
+    }
+    const repo = process.env.GITHUB_REPOSITORY;
+    if (repo) {
+      const remoteAdd = git(
+        ['remote', 'add', 'origin', `https://github.com/${repo}`],
+        workspace,
+      );
+      if (!remoteAdd.ok) {
+        fail(`Could not add origin remote: ${commandDetails(remoteAdd)}`);
+      }
+    }
+  }
+}
+
+function fetchFromOrigin(ref, workspace) {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) {
+    return;
+  }
+  const authHeader = Buffer.from(`x-access-token:${token}`, 'utf8').toString(
+    'base64',
+  );
+  const configArgs = [
+    '-c',
+    `http.https://github.com/.extraheader=AUTHORIZATION: basic ${authHeader}`,
+  ];
+
+  if (FULL_SHA_PATTERN.test(ref)) {
+    git([...configArgs, 'fetch', '--no-tags', 'origin', ref], workspace);
+    return;
+  }
+
+  const branch = ref
+    .replace(/^origin\//, '')
+    .replace(/^refs\/remotes\/origin\//, '');
+  git(
+    [
+      ...configArgs,
+      'fetch',
+      '--no-tags',
+      'origin',
+      `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+    ],
+    workspace,
+  );
+}
+
+function resolveBaseCommit(baseRef, workspace) {
+  let res = git(['rev-parse', '--verify', `${baseRef}^{commit}`], workspace);
+  if (res.ok) {
+    return {ok: true, sha: res.stdout.trim()};
+  }
+  if (!baseRef.startsWith('refs/')) {
+    res = git(
+      ['rev-parse', '--verify', `refs/remotes/${baseRef}^{commit}`],
+      workspace,
+    );
+    if (res.ok) {
+      return {ok: true, sha: res.stdout.trim()};
+    }
+  }
+  return {error: res, ok: false};
+}
+
 function fetchPullRequestCommits({
   prBaseSha,
   prCommitCount,
@@ -100,19 +202,7 @@ function fetchPullRequestCommits({
     'base64',
   );
 
-  if (!existsSync(join(workspace, '.git'))) {
-    const init = git(['init'], workspace);
-    if (!init.ok) {
-      fail(`Could not initialize git repository: ${commandDetails(init)}`);
-    }
-    const remoteAdd = git(
-      ['remote', 'add', 'origin', `https://github.com/${requiredEnv('GITHUB_REPOSITORY')}`],
-      workspace,
-    );
-    if (!remoteAdd.ok) {
-      fail(`Could not add origin remote: ${commandDetails(remoteAdd)}`);
-    }
-  }
+  ensureGitRepository(workspace);
 
   const fetchBase = git(
     [
@@ -179,6 +269,91 @@ function verifyPullRequestCommits({
     );
   }
 
+  verifyCommits(commits, allowedSignersPath, workspace);
+
+  workflowCommand(
+    'notice',
+    `All ${commits.length} PR commit(s) are signed by allowed SSH keys.`,
+  );
+}
+
+function verifyCommitRange({
+  allowedSignersPath,
+  baseRef,
+  headSha,
+  workspace,
+}) {
+  ensureGitRepository(workspace);
+
+  let headExists = git(['cat-file', '-e', `${headSha}^{commit}`], workspace);
+  if (!headExists.ok && process.env.GITHUB_TOKEN) {
+    fetchFromOrigin(headSha, workspace);
+    headExists = git(['cat-file', '-e', `${headSha}^{commit}`], workspace);
+  }
+  if (!headExists.ok) {
+    fail(
+      `Could not find head commit ${headSha} in workspace: ${commandDetails(headExists)}`,
+    );
+  }
+
+  let baseResolve = resolveBaseCommit(baseRef, workspace);
+  if (!baseResolve.ok && process.env.GITHUB_TOKEN) {
+    fetchFromOrigin(baseRef, workspace);
+    baseResolve = resolveBaseCommit(baseRef, workspace);
+  }
+  if (!baseResolve.ok) {
+    fail(
+      `Could not resolve base ref "${baseRef}" to a commit: ${commandDetails(baseResolve.error)}`,
+    );
+  }
+  const baseSha = validateSha('base SHA', baseResolve.sha);
+
+  const revList = git(
+    ['rev-list', '--reverse', `${baseSha}..${headSha}`],
+    workspace,
+  );
+  if (!revList.ok) {
+    fail(
+      `Could not list commits between ${baseSha} and ${headSha}: ${commandDetails(revList)}`,
+    );
+  }
+
+  const commits = revList.stdout
+    .trim()
+    .split(LINE_SPLIT_PATTERN)
+    .filter(Boolean);
+
+  if (commits.length === 0) {
+    const isAncestor = git(
+      ['merge-base', '--is-ancestor', headSha, baseSha],
+      workspace,
+    );
+    if (!isAncestor.ok) {
+      fail(
+        `Target commit ${headSha} and base ref ${baseRef} (${baseSha}) produced 0 commits, but ${headSha} is not an ancestor of ${baseSha}.`,
+      );
+    }
+    info(
+      `Target commit ${headSha.slice(0, 12)} is already merged into ${baseRef} (${baseSha.slice(0, 12)}); no unmerged commits to verify.`,
+    );
+    workflowCommand(
+      'notice',
+      `Commit ${headSha.slice(0, 12)} is already merged into ${baseRef}.`,
+    );
+    return;
+  }
+
+  info(
+    `Checking ${commits.length} unmerged commit(s) between ${baseRef} (${baseSha.slice(0, 12)}) and ${headSha.slice(0, 12)}.`,
+  );
+  verifyCommits(commits, allowedSignersPath, workspace);
+  workflowCommand(
+    'notice',
+    `All ${commits.length} unmerged commit(s) are signed by allowed SSH keys.`,
+  );
+}
+
+function verifyCommits(commits, allowedSignersPath, workspace) {
   const failures = [];
   for (const commit of commits) {
     const shortSha = commit.slice(0, 12);
@@ -211,11 +386,6 @@ function verifyPullRequestCommits({
       `Signed commit author check failed for ${failures.length}/${commits.length} commit(s):\n${details}`,
     );
   }
-
-  workflowCommand(
-    'notice',
-    `All ${commits.length} PR commit(s) are signed by allowed SSH keys.`,
-  );
 }
 
 function verifyAllowedSignature(commit, allowedSignersPath, workspace) {

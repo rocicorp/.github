@@ -1,5 +1,5 @@
 name: Verify Signed Commit Authors
-description: Verify that every pull request commit is SSH-signed by an allowed key.
+description: Verify that pull request commits or specified commit ranges are SSH-signed by an allowed key.
 
 inputs:
   enforce:
@@ -8,7 +8,15 @@ inputs:
     required: false
   github-token:
     description: Token with contents:read access to fetch pull request commits.
-    required: true
+    default: ${{ github.token }}
+    required: false
+  head-sha:
+    description: Commit SHA to verify when not running on a pull request.
+    required: false
+  base-ref:
+    description: Base branch or commit ref to compare against (defaults to origin/main).
+    default: 'origin/main'
+    required: false
 
 runs:
   using: composite
@@ -19,4 +27,6 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         SIGNED_COMMIT_ACTION_PATH: ${{ github.action_path }}
         SIGNED_COMMIT_ENFORCE: ${{ inputs.enforce }}
+        SIGNED_COMMIT_HEAD_SHA: ${{ inputs.head-sha }}
+        SIGNED_COMMIT_BASE_REF: ${{ inputs.base-ref }}
       run: node "$SIGNED_COMMIT_ACTION_PATH/verify-signed-commit-authors.mjs"

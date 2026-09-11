@@ -108,7 +108,123 @@ test('warn-only mode logs failures without failing the workflow', () => {
   assert.match(result.stdout, /::warning::.*has no active signing keys/);
 });
 
-function runVerifier({allowedSigners = activeAllowedSigners, env = {}} = {}) {
+test('accepts explicit head-sha commit range when not running on a pull request', () => {
+  const result = runVerifier({
+    env: {
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Checking signatures against 1 allowed SSH key entry\./,
+  );
+  assert.match(
+    result.stdout,
+    /Checking 2 unmerged commit\(s\) between origin\/main \(111111111111\) and 333333333333\./,
+  );
+  assert.match(
+    result.stdout,
+    /222222222222: allowed SSH signature for alice@example\.com using SHA256:alice/,
+  );
+  assert.match(
+    result.stdout,
+    /333333333333: allowed SSH signature for alice@example\.com using SHA256:alice/,
+  );
+  assert.match(
+    result.stdout,
+    /::notice::All 2 unmerged commit\(s\) are signed by allowed SSH keys\./,
+  );
+});
+
+test('accepts explicit head-sha when commit is already merged into base-ref', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_EMPTY_REV_LIST: '1',
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: baseSha,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Target commit 111111111111 is already merged into origin\/main \(111111111111\); no unmerged commits to verify\./,
+  );
+  assert.match(
+    result.stdout,
+    /::notice::Commit 111111111111 is already merged into origin\/main\./,
+  );
+});
+
+test('rejects explicit head-sha when an unmerged commit has an invalid signature', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_DENY_COMMIT: secondCommit,
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /::error::Signed commit author check failed for 1\/2 commit\(s\):%0A- 333333333333: signature is not made by an allowed SSH signing key: signature key is not allowed - reject me/,
+  );
+});
+
+test('rejects run when neither pull_request payload nor head-sha is provided', () => {
+  const result = runVerifier({
+    event: null,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /::error::No pull_request payload and no head-sha provided\./,
+  );
+});
+
+test('rejects mismatched head-sha on a pull request event', () => {
+  const result = runVerifier({
+    env: {
+      SIGNED_COMMIT_HEAD_SHA: '4444444444444444444444444444444444444444',
+    },
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /Cannot override target commit on a pull request/,
+  );
+});
+
+test('rejects invalid base-ref starting with dash', () => {
+  const result = runVerifier({
+    env: {
+      SIGNED_COMMIT_BASE_REF: '--upload-pack',
+      SIGNED_COMMIT_HEAD_SHA: headSha,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /Invalid base ref "--upload-pack": must not start with a dash\./,
+  );
+});
+
+function runVerifier({
+  allowedSigners = activeAllowedSigners,
+  env = {},
+  event,
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'verify-signed-commit-authors-test-'));
   tempDirs.push(dir);
 
@@ -134,24 +250,29 @@ function runVerifier({allowedSigners = activeAllowedSigners, env = {}} = {}) {
   mkdirSync(dirname(allowedSignersPath), {recursive: true});
   writeFileSync(allowedSignersPath, allowedSigners);
 
-  const eventPath = join(dir, 'event.json');
-  writeFileSync(
-    eventPath,
-    JSON.stringify({
-      pull_request: {
-        base: {sha: baseSha},
-        commits: 2,
-        head: {sha: headSha},
-        number: 42,
-      },
-    }),
-  );
+  let eventPath;
+  if (event !== null) {
+    eventPath = join(dir, 'event.json');
+    writeFileSync(
+      eventPath,
+      JSON.stringify(
+        event ?? {
+          pull_request: {
+            base: {sha: baseSha},
+            commits: 2,
+            head: {sha: headSha},
+            number: 42,
+          },
+        },
+      ),
+    );
+  }
   writeToolStubs(binDir, dir);
 
   const result = spawnSync(process.execPath, [scriptPath], {
     encoding: 'utf8',
     env: {
-      GITHUB_EVENT_PATH: eventPath,
+      ...(eventPath ? {GITHUB_EVENT_PATH: eventPath} : {}),
       GITHUB_REPOSITORY: 'rocicorp/.github',
       GITHUB_TOKEN: 'github-token',
       GITHUB_WORKSPACE: workspace,
@@ -199,7 +320,26 @@ if (command === 'cat-file' && args[1] === '-e') {
   process.exit(0);
 }
 
+if (command === 'rev-parse') {
+  if (process.env.FAKE_GIT_FAIL_REV_PARSE) {
+    process.stderr.write('fatal: bad revision\\n');
+    process.exit(1);
+  }
+  process.stdout.write(${JSON.stringify(`${baseSha}\n`)});
+  process.exit(0);
+}
+
+if (command === 'merge-base') {
+  if (process.env.FAKE_GIT_FAIL_MERGE_BASE) {
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
 if (command === 'rev-list') {
+  if (process.env.FAKE_GIT_EMPTY_REV_LIST) {
+    process.exit(0);
+  }
   process.stdout.write(${JSON.stringify(`${firstCommit}\n${secondCommit}\n`)});
   process.exit(0);
 }
