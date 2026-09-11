@@ -160,7 +160,8 @@ function fetchFromOrigin(ref, workspace) {
 
   const branch = ref
     .replace(/^origin\//, '')
-    .replace(/^refs\/remotes\/origin\//, '');
+    .replace(/^refs\/remotes\/origin\//, '')
+    .replace(/^refs\/heads\//, '');
   git(
     [
       ...configArgs,
@@ -173,14 +174,43 @@ function fetchFromOrigin(ref, workspace) {
   );
 }
 
+function isShallowRepository(workspace) {
+  const res = git(['rev-parse', '--is-shallow-repository'], workspace);
+  return res.ok && res.stdout.trim() === 'true';
+}
+
+function unshallowFromOrigin(workspace) {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) {
+    return;
+  }
+  const authHeader = Buffer.from(`x-access-token:${token}`, 'utf8').toString(
+    'base64',
+  );
+  git(
+    [
+      '-c',
+      `http.https://github.com/.extraheader=AUTHORIZATION: basic ${authHeader}`,
+      'fetch',
+      '--unshallow',
+      '--no-tags',
+      'origin',
+    ],
+    workspace,
+  );
+}
+
 function resolveBaseCommit(baseRef, workspace) {
   let res = git(['rev-parse', '--verify', `${baseRef}^{commit}`], workspace);
   if (res.ok) {
     return {ok: true, sha: res.stdout.trim()};
   }
   if (!baseRef.startsWith('refs/')) {
+    const remoteRef = baseRef.startsWith('origin/')
+      ? `refs/remotes/${baseRef}`
+      : `refs/remotes/origin/${baseRef}`;
     res = git(
-      ['rev-parse', '--verify', `refs/remotes/${baseRef}^{commit}`],
+      ['rev-parse', '--verify', `${remoteRef}^{commit}`],
       workspace,
     );
     if (res.ok) {
@@ -284,6 +314,15 @@ function verifyCommitRange({
   workspace,
 }) {
   ensureGitRepository(workspace);
+
+  if (isShallowRepository(workspace) && process.env.GITHUB_TOKEN) {
+    unshallowFromOrigin(workspace);
+  }
+  if (isShallowRepository(workspace)) {
+    fail(
+      'Cannot verify commit range in a shallow repository because intermediate commits cannot be reliably discovered. Please ensure the repository is not shallow (e.g. actions/checkout with fetch-depth: 0) or provide GITHUB_TOKEN so the action can unshallow the repository.',
+    );
+  }
 
   let headExists = git(['cat-file', '-e', `${headSha}^{commit}`], workspace);
   if (!headExists.ok && process.env.GITHUB_TOKEN) {

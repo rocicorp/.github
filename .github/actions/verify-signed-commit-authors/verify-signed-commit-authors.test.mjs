@@ -220,6 +220,84 @@ test('rejects invalid base-ref starting with dash', () => {
   );
 });
 
+test('accepts plain branch name (e.g. "main") for base-ref', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_FAIL_REV_PARSE_REFS: 'main^{commit},refs/remotes/main^{commit}',
+      SIGNED_COMMIT_BASE_REF: 'main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Checking 2 unmerged commit\(s\) between main \(111111111111\) and 333333333333\./,
+  );
+});
+
+test('unshallows repository in commit-range mode when shallow', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_SHALLOW: '1',
+      GITHUB_TOKEN: 'github-token',
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Checking 2 unmerged commit\(s\) between origin\/main \(111111111111\) and 333333333333\./,
+  );
+  const calls = readFileSync(join(result.dir, 'tool-calls.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line));
+  const unshallowCall = calls.find(
+    call => call.command === 'git' && call.args.includes('--unshallow'),
+  );
+  assert.ok(unshallowCall, 'Expected git fetch --unshallow to be called');
+});
+
+test('fails closed when repository is shallow and cannot be unshallowed', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_ALWAYS_SHALLOW: '1',
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /::error::Cannot verify commit range in a shallow repository because intermediate commits cannot be reliably discovered\./,
+  );
+});
+
+test('fails closed when repository is shallow and GITHUB_TOKEN is missing', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_SHALLOW: '1',
+      GITHUB_TOKEN: '',
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /::error::Cannot verify commit range in a shallow repository because intermediate commits cannot be reliably discovered\./,
+  );
+});
+
 function runVerifier({
   allowedSigners = activeAllowedSigners,
   env = {},
@@ -293,7 +371,7 @@ function writeToolStubs(binDir, dir) {
   writeExecutable(
     join(binDir, 'git'),
     `#!/usr/bin/env node
-import {appendFileSync} from 'node:fs';
+import {appendFileSync, existsSync} from 'node:fs';
 
 const allArgs = process.argv.slice(2);
 appendFileSync(
@@ -313,6 +391,13 @@ if (command === 'remote' && args[1] === 'add') {
 }
 
 if (command === 'fetch') {
+  if (args.includes('--unshallow')) {
+    if (process.env.FAKE_GIT_FAIL_UNSHALLOW) {
+      process.stderr.write('fatal: could not unshallow\\n');
+      process.exit(1);
+    }
+    appendFileSync(${JSON.stringify(join(dir, 'unshallow-called'))}, '1');
+  }
   process.exit(0);
 }
 
@@ -321,8 +406,29 @@ if (command === 'cat-file' && args[1] === '-e') {
 }
 
 if (command === 'rev-parse') {
+  if (args.includes('--is-shallow-repository')) {
+    if (process.env.FAKE_GIT_ALWAYS_SHALLOW) {
+      process.stdout.write('true\\n');
+      process.exit(0);
+    }
+    if (process.env.FAKE_GIT_SHALLOW) {
+      const unshallowed = existsSync(${JSON.stringify(join(dir, 'unshallow-called'))});
+      process.stdout.write((unshallowed ? 'false' : 'true') + '\\n');
+      process.exit(0);
+    }
+    process.stdout.write('false\\n');
+    process.exit(0);
+  }
   if (process.env.FAKE_GIT_FAIL_REV_PARSE) {
     process.stderr.write('fatal: bad revision\\n');
+    process.exit(1);
+  }
+  const failRefs = (process.env.FAKE_GIT_FAIL_REV_PARSE_REFS || '')
+    .split(',')
+    .filter(Boolean);
+  const verifyTarget = args[args.indexOf('--verify') + 1];
+  if (verifyTarget && failRefs.includes(verifyTarget)) {
+    process.stderr.write(\`fatal: Needed a single revision: \${verifyTarget}\\n\`);
     process.exit(1);
   }
   process.stdout.write(${JSON.stringify(`${baseSha}\n`)});
