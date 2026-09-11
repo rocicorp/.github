@@ -108,7 +108,262 @@ test('warn-only mode logs failures without failing the workflow', () => {
   assert.match(result.stdout, /::warning::.*has no active signing keys/);
 });
 
-function runVerifier({allowedSigners = activeAllowedSigners, env = {}} = {}) {
+test('accepts explicit head-sha commit range when not running on a pull request', () => {
+  const result = runVerifier({
+    env: {
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Checking signatures against 1 allowed SSH key entry\./,
+  );
+  assert.match(
+    result.stdout,
+    /Checking 2 unmerged commit\(s\) between origin\/main \(111111111111\) and 333333333333\./,
+  );
+  assert.match(
+    result.stdout,
+    /222222222222: allowed SSH signature for alice@example\.com using SHA256:alice/,
+  );
+  assert.match(
+    result.stdout,
+    /333333333333: allowed SSH signature for alice@example\.com using SHA256:alice/,
+  );
+  assert.match(
+    result.stdout,
+    /::notice::All 2 unmerged commit\(s\) are signed by allowed SSH keys\./,
+  );
+});
+
+test('accepts explicit head-sha when commit is already merged into base-ref', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_EMPTY_REV_LIST: '1',
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: baseSha,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Target commit 111111111111 is already merged into origin\/main \(111111111111\); no unmerged commits to verify\./,
+  );
+  assert.match(
+    result.stdout,
+    /::notice::Commit 111111111111 is already merged into origin\/main\./,
+  );
+});
+
+test('rejects explicit head-sha when an unmerged commit has an invalid signature', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_DENY_COMMIT: secondCommit,
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /::error::Signed commit author check failed for 1\/2 commit\(s\):%0A- 333333333333: signature is not made by an allowed SSH signing key: signature key is not allowed - reject me/,
+  );
+});
+
+test('rejects run when neither pull_request payload nor head-sha is provided', () => {
+  const result = runVerifier({
+    event: null,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /::error::No pull_request payload and no head-sha provided\./,
+  );
+});
+
+test('rejects head-sha on a pull request event', () => {
+  const result = runVerifier({
+    env: {
+      SIGNED_COMMIT_HEAD_SHA: headSha,
+    },
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /::error::head-sha cannot be specified on a pull request event; commits are determined from the pull request payload\./,
+  );
+});
+
+test('rejects invalid base-ref starting with dash', () => {
+  const result = runVerifier({
+    env: {
+      SIGNED_COMMIT_BASE_REF: '--upload-pack',
+      SIGNED_COMMIT_HEAD_SHA: headSha,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /Invalid base ref "--upload-pack": must not start with a dash\./,
+  );
+});
+
+test('accepts plain branch name (e.g. "main") for base-ref', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_FAIL_REV_PARSE_REFS: 'main^{commit},refs/remotes/main^{commit}',
+      SIGNED_COMMIT_BASE_REF: 'main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Checking 2 unmerged commit\(s\) between main \(111111111111\) and 333333333333\./,
+  );
+});
+
+test('accepts fully qualified branch ref (e.g. "refs/heads/main") for base-ref', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_FAIL_REV_PARSE_REFS: 'refs/heads/main^{commit}',
+      SIGNED_COMMIT_BASE_REF: 'refs/heads/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Checking 2 unmerged commit\(s\) between refs\/heads\/main \(111111111111\) and 333333333333\./,
+  );
+});
+
+test('resolves plain branch name through refs/heads/ or refs/remotes/origin/ even if a tag has the same name', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_FAIL_REV_PARSE_REFS: 'main^{commit}',
+      SIGNED_COMMIT_BASE_REF: 'main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Checking 2 unmerged commit\(s\) between main \(111111111111\) and 333333333333\./,
+  );
+  const calls = readFileSync(join(result.dir, 'tool-calls.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line));
+  const revParseCalls = calls.filter(
+    call => call.command === 'git' && call.args[0] === 'rev-parse',
+  );
+  assert.ok(
+    revParseCalls.every(call => !call.args.includes('main^{commit}')),
+    'Expected no git rev-parse call for bare ambiguous main^{commit}',
+  );
+});
+
+test('accepts uppercase head-sha in commit-range mode', () => {
+  const result = runVerifier({
+    env: {
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit.toUpperCase(),
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Checking 2 unmerged commit\(s\) between origin\/main \(111111111111\) and 333333333333\./,
+  );
+});
+
+test('unshallows repository in commit-range mode when shallow', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_SHALLOW: '1',
+      GITHUB_TOKEN: 'github-token',
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Checking 2 unmerged commit\(s\) between origin\/main \(111111111111\) and 333333333333\./,
+  );
+  const calls = readFileSync(join(result.dir, 'tool-calls.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line));
+  const unshallowCall = calls.find(
+    call => call.command === 'git' && call.args.includes('--unshallow'),
+  );
+  assert.ok(unshallowCall, 'Expected git fetch --unshallow to be called');
+});
+
+test('fails closed when repository is shallow and cannot be unshallowed', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_ALWAYS_SHALLOW: '1',
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /::error::Cannot verify commit range in a shallow repository because intermediate commits cannot be reliably discovered\./,
+  );
+});
+
+test('fails closed when repository is shallow and GITHUB_TOKEN is missing', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_SHALLOW: '1',
+      GITHUB_TOKEN: '',
+      SIGNED_COMMIT_BASE_REF: 'origin/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /::error::Cannot verify commit range in a shallow repository because intermediate commits cannot be reliably discovered\./,
+  );
+});
+
+function runVerifier({
+  allowedSigners = activeAllowedSigners,
+  env = {},
+  event,
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'verify-signed-commit-authors-test-'));
   tempDirs.push(dir);
 
@@ -134,24 +389,29 @@ function runVerifier({allowedSigners = activeAllowedSigners, env = {}} = {}) {
   mkdirSync(dirname(allowedSignersPath), {recursive: true});
   writeFileSync(allowedSignersPath, allowedSigners);
 
-  const eventPath = join(dir, 'event.json');
-  writeFileSync(
-    eventPath,
-    JSON.stringify({
-      pull_request: {
-        base: {sha: baseSha},
-        commits: 2,
-        head: {sha: headSha},
-        number: 42,
-      },
-    }),
-  );
+  let eventPath;
+  if (event !== null) {
+    eventPath = join(dir, 'event.json');
+    writeFileSync(
+      eventPath,
+      JSON.stringify(
+        event ?? {
+          pull_request: {
+            base: {sha: baseSha},
+            commits: 2,
+            head: {sha: headSha},
+            number: 42,
+          },
+        },
+      ),
+    );
+  }
   writeToolStubs(binDir, dir);
 
   const result = spawnSync(process.execPath, [scriptPath], {
     encoding: 'utf8',
     env: {
-      GITHUB_EVENT_PATH: eventPath,
+      ...(eventPath ? {GITHUB_EVENT_PATH: eventPath} : {}),
       GITHUB_REPOSITORY: 'rocicorp/.github',
       GITHUB_TOKEN: 'github-token',
       GITHUB_WORKSPACE: workspace,
@@ -172,7 +432,7 @@ function writeToolStubs(binDir, dir) {
   writeExecutable(
     join(binDir, 'git'),
     `#!/usr/bin/env node
-import {appendFileSync} from 'node:fs';
+import {appendFileSync, existsSync} from 'node:fs';
 
 const allArgs = process.argv.slice(2);
 appendFileSync(
@@ -192,6 +452,13 @@ if (command === 'remote' && args[1] === 'add') {
 }
 
 if (command === 'fetch') {
+  if (args.includes('--unshallow')) {
+    if (process.env.FAKE_GIT_FAIL_UNSHALLOW) {
+      process.stderr.write('fatal: could not unshallow\\n');
+      process.exit(1);
+    }
+    appendFileSync(${JSON.stringify(join(dir, 'unshallow-called'))}, '1');
+  }
   process.exit(0);
 }
 
@@ -199,7 +466,47 @@ if (command === 'cat-file' && args[1] === '-e') {
   process.exit(0);
 }
 
+if (command === 'rev-parse') {
+  if (args.includes('--is-shallow-repository')) {
+    if (process.env.FAKE_GIT_ALWAYS_SHALLOW) {
+      process.stdout.write('true\\n');
+      process.exit(0);
+    }
+    if (process.env.FAKE_GIT_SHALLOW) {
+      const unshallowed = existsSync(${JSON.stringify(join(dir, 'unshallow-called'))});
+      process.stdout.write((unshallowed ? 'false' : 'true') + '\\n');
+      process.exit(0);
+    }
+    process.stdout.write('false\\n');
+    process.exit(0);
+  }
+  if (process.env.FAKE_GIT_FAIL_REV_PARSE) {
+    process.stderr.write('fatal: bad revision\\n');
+    process.exit(1);
+  }
+  const failRefs = (process.env.FAKE_GIT_FAIL_REV_PARSE_REFS || '')
+    .split(',')
+    .filter(Boolean);
+  const verifyTarget = args[args.indexOf('--verify') + 1];
+  if (verifyTarget && failRefs.includes(verifyTarget)) {
+    process.stderr.write(\`fatal: Needed a single revision: \${verifyTarget}\\n\`);
+    process.exit(1);
+  }
+  process.stdout.write(${JSON.stringify(`${baseSha}\n`)});
+  process.exit(0);
+}
+
+if (command === 'merge-base') {
+  if (process.env.FAKE_GIT_FAIL_MERGE_BASE) {
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
 if (command === 'rev-list') {
+  if (process.env.FAKE_GIT_EMPTY_REV_LIST) {
+    process.exit(0);
+  }
   process.stdout.write(${JSON.stringify(`${firstCommit}\n${secondCommit}\n`)});
   process.exit(0);
 }
