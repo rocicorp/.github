@@ -237,6 +237,23 @@ test('accepts plain branch name (e.g. "main") for base-ref', () => {
   );
 });
 
+test('accepts fully qualified branch ref (e.g. "refs/heads/main") for base-ref', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_FAIL_REV_PARSE_REFS: 'refs/heads/main^{commit}',
+      SIGNED_COMMIT_BASE_REF: 'refs/heads/main',
+      SIGNED_COMMIT_HEAD_SHA: secondCommit,
+    },
+    event: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /Checking 2 unmerged commit\(s\) between refs\/heads\/main \(111111111111\) and 333333333333\./,
+  );
+});
+
 test('unshallows repository in commit-range mode when shallow', () => {
   const result = runVerifier({
     env: {

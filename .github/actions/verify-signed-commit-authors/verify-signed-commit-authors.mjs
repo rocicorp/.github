@@ -205,10 +205,15 @@ function resolveBaseCommit(baseRef, workspace) {
   if (res.ok) {
     return {ok: true, sha: res.stdout.trim()};
   }
-  if (!baseRef.startsWith('refs/')) {
-    const remoteRef = baseRef.startsWith('origin/')
+  let remoteRef;
+  if (baseRef.startsWith('refs/heads/')) {
+    remoteRef = `refs/remotes/origin/${baseRef.slice('refs/heads/'.length)}`;
+  } else if (!baseRef.startsWith('refs/')) {
+    remoteRef = baseRef.startsWith('origin/')
       ? `refs/remotes/${baseRef}`
       : `refs/remotes/origin/${baseRef}`;
+  }
+  if (remoteRef) {
     res = git(
       ['rev-parse', '--verify', `${remoteRef}^{commit}`],
       workspace,
