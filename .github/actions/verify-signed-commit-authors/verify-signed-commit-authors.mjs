@@ -8,6 +8,15 @@ const DEFAULT_ALLOWED_SIGNERS_RELATIVE_PATH = '../../signing/allowed_signers';
 const FULL_SHA_PATTERN = /^[0-9a-fA-F]{40}$/;
 const INTEGER_PATTERN = /^[0-9]+$/;
 const LINE_SPLIT_PATTERN = /\r?\n/;
+// A merge commit in the PR branch (e.g. from merging the base branch in)
+// can put the true merge-base much further back on the merged-in side than
+// the initial shallow fetch's depth budget reaches, since that budget is
+// sized for a linear history of prCommitCount commits. When that happens,
+// rev-list can't prove shared ancestry across the shallow boundary and
+// overcounts. Retry with a deepened fetch a few times before paying for a
+// full unshallow fetch, so the common (linear-history) case stays cheap.
+const MAX_DEEPEN_ATTEMPTS = 4;
+const DEEPEN_MULTIPLIER = 4;
 
 const enforce = process.env.SIGNED_COMMIT_ENFORCE !== 'false';
 
@@ -63,6 +72,7 @@ function main() {
       expectedCommitCount: prCommitCount,
       prBaseSha,
       prHeadSha,
+      prNumber,
       workspace,
     });
     return;
@@ -140,18 +150,22 @@ function ensureGitRepository(workspace) {
   }
 }
 
+function authConfigArgs(token) {
+  const authHeader = Buffer.from(`x-access-token:${token}`, 'utf8').toString(
+    'base64',
+  );
+  return [
+    '-c',
+    `http.https://github.com/.extraheader=AUTHORIZATION: basic ${authHeader}`,
+  ];
+}
+
 function fetchFromOrigin(ref, workspace) {
   const token = process.env.GITHUB_TOKEN;
   if (!token) {
     return;
   }
-  const authHeader = Buffer.from(`x-access-token:${token}`, 'utf8').toString(
-    'base64',
-  );
-  const configArgs = [
-    '-c',
-    `http.https://github.com/.extraheader=AUTHORIZATION: basic ${authHeader}`,
-  ];
+  const configArgs = authConfigArgs(token);
 
   if (FULL_SHA_PATTERN.test(ref)) {
     git([...configArgs, 'fetch', '--no-tags', 'origin', ref], workspace);
@@ -184,18 +198,8 @@ function unshallowFromOrigin(workspace) {
   if (!token) {
     return;
   }
-  const authHeader = Buffer.from(`x-access-token:${token}`, 'utf8').toString(
-    'base64',
-  );
   git(
-    [
-      '-c',
-      `http.https://github.com/.extraheader=AUTHORIZATION: basic ${authHeader}`,
-      'fetch',
-      '--unshallow',
-      '--no-tags',
-      'origin',
-    ],
+    [...authConfigArgs(token), 'fetch', '--unshallow', '--no-tags', 'origin'],
     workspace,
   );
 }
@@ -239,21 +243,11 @@ function fetchPullRequestCommits({
   workspace,
 }) {
   const token = requiredEnv('GITHUB_TOKEN');
-  const authHeader = Buffer.from(`x-access-token:${token}`, 'utf8').toString(
-    'base64',
-  );
 
   ensureGitRepository(workspace);
 
   const fetchBase = git(
-    [
-      '-c',
-      `http.https://github.com/.extraheader=AUTHORIZATION: basic ${authHeader}`,
-      'fetch',
-      '--no-tags',
-      'origin',
-      prBaseSha,
-    ],
+    [...authConfigArgs(token), 'fetch', '--no-tags', 'origin', prBaseSha],
     workspace,
   );
   if (!fetchBase.ok) {
@@ -262,8 +256,7 @@ function fetchPullRequestCommits({
 
   const fetch = git(
     [
-      '-c',
-      `http.https://github.com/.extraheader=AUTHORIZATION: basic ${authHeader}`,
+      ...authConfigArgs(token),
       'fetch',
       '--no-tags',
       `--depth=${prCommitCount + 1}`,
@@ -290,25 +283,16 @@ function verifyPullRequestCommits({
   expectedCommitCount,
   prBaseSha,
   prHeadSha,
+  prNumber,
   workspace,
 }) {
-  const revList = git(
-    ['rev-list', '--reverse', `${prBaseSha}..${prHeadSha}`],
+  const commits = resolvePullRequestCommits({
+    expectedCommitCount,
+    prBaseSha,
+    prHeadSha,
+    prNumber,
     workspace,
-  );
-  if (!revList.ok) {
-    fail(`Could not list PR commits locally: ${commandDetails(revList)}`);
-  }
-
-  const commits = revList.stdout
-    .trim()
-    .split(LINE_SPLIT_PATTERN)
-    .filter(Boolean);
-  if (commits.length !== expectedCommitCount) {
-    fail(
-      `Expected ${expectedCommitCount} PR commit(s) from the pull_request payload, but git rev-list found ${commits.length}.`,
-    );
-  }
+  });
 
   verifyCommits(commits, allowedSignersPath, workspace);
 
@@ -316,6 +300,75 @@ function verifyPullRequestCommits({
     'notice',
     `All ${commits.length} PR commit(s) are signed by allowed SSH keys.`,
   );
+}
+
+function listCommitsInRange(baseSha, headSha, workspace) {
+  const revList = git(
+    ['rev-list', '--reverse', `${baseSha}..${headSha}`],
+    workspace,
+  );
+  if (!revList.ok) {
+    fail(`Could not list PR commits locally: ${commandDetails(revList)}`);
+  }
+  return revList.stdout.trim().split(LINE_SPLIT_PATTERN).filter(Boolean);
+}
+
+function deepenPullRequestFetch({deepenBy, prNumber, workspace}) {
+  const token = requiredEnv('GITHUB_TOKEN');
+  const deepen = git(
+    [
+      ...authConfigArgs(token),
+      'fetch',
+      '--no-tags',
+      `--deepen=${deepenBy}`,
+      'origin',
+      `+refs/pull/${prNumber}/head:refs/remotes/pull/${prNumber}/head`,
+    ],
+    workspace,
+  );
+  if (!deepen.ok) {
+    fail(`Could not deepen PR history: ${commandDetails(deepen)}`);
+  }
+}
+
+function resolvePullRequestCommits({
+  expectedCommitCount,
+  prBaseSha,
+  prHeadSha,
+  prNumber,
+  workspace,
+}) {
+  let commits = listCommitsInRange(prBaseSha, prHeadSha, workspace);
+
+  let deepenBy = Math.max(expectedCommitCount, 1) * DEEPEN_MULTIPLIER;
+  for (
+    let attempt = 0;
+    commits.length !== expectedCommitCount && attempt < MAX_DEEPEN_ATTEMPTS;
+    attempt++
+  ) {
+    deepenPullRequestFetch({deepenBy, prNumber, workspace});
+    commits = listCommitsInRange(prBaseSha, prHeadSha, workspace);
+    deepenBy *= DEEPEN_MULTIPLIER;
+  }
+
+  // Guaranteed correct (no shallow boundary left to hide shared ancestry),
+  // but expensive, so it's only a last resort after deepening fails to
+  // converge.
+  if (
+    commits.length !== expectedCommitCount &&
+    isShallowRepository(workspace)
+  ) {
+    unshallowFromOrigin(workspace);
+    commits = listCommitsInRange(prBaseSha, prHeadSha, workspace);
+  }
+
+  if (commits.length !== expectedCommitCount) {
+    fail(
+      `Expected ${expectedCommitCount} PR commit(s) from the pull_request payload, but git rev-list found ${commits.length}.`,
+    );
+  }
+
+  return commits;
 }
 
 function verifyCommitRange({
