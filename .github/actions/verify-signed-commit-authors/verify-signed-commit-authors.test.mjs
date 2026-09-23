@@ -18,6 +18,7 @@ const scriptPath = fileURLToPath(
 const baseSha = '1111111111111111111111111111111111111111';
 const firstCommit = '2222222222222222222222222222222222222222';
 const secondCommit = '3333333333333333333333333333333333333333';
+const phantomCommit = '4444444444444444444444444444444444444444';
 const headSha = secondCommit;
 const activeAllowedSigners =
   'alice@example.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey\n';
@@ -70,6 +71,78 @@ test('accepts pull request commits signed by allowed SSH keys', () => {
         ),
     ),
     'expected git signature checks to use the action-local allowed signers file',
+  );
+});
+
+test('deepens the shallow fetch and retries when a merge commit undercounts the initial depth', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_REQUIRE_DEEPENS: '1',
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /::notice::All 2 PR commit\(s\) are signed by allowed SSH keys\./,
+  );
+
+  const calls = readToolCalls(result.dir);
+  const deepenCalls = calls.filter(
+    call =>
+      call.command === 'git' &&
+      call.args.some(arg => arg.startsWith('--deepen=')),
+  );
+  assert.equal(
+    deepenCalls.length,
+    1,
+    'expected exactly one deepen fetch before the count converged',
+  );
+});
+
+test('falls back to a full unshallow fetch when deepening does not converge, and still succeeds if that fixes it', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_REQUIRE_DEEPENS: '100',
+      FAKE_GIT_SHALLOW: '1',
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(
+    result.stdout,
+    /::notice::All 2 PR commit\(s\) are signed by allowed SSH keys\./,
+  );
+
+  const calls = readToolCalls(result.dir);
+  const deepenCalls = calls.filter(
+    call =>
+      call.command === 'git' &&
+      call.args.some(arg => arg.startsWith('--deepen=')),
+  );
+  assert.equal(
+    deepenCalls.length,
+    4,
+    'expected all deepen attempts to be exhausted before falling back',
+  );
+  const unshallowCall = calls.find(
+    call => call.command === 'git' && call.args.includes('--unshallow'),
+  );
+  assert.ok(unshallowCall, 'expected git fetch --unshallow as a last resort');
+});
+
+test('fails closed when the commit count still does not match after deepening and unshallowing', () => {
+  const result = runVerifier({
+    env: {
+      FAKE_GIT_ALWAYS_MISMATCH: '1',
+      FAKE_GIT_SHALLOW: '1',
+    },
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stdout,
+    /::error::Expected 2 PR commit\(s\) from the pull_request payload, but git rev-list found 3\./,
   );
 });
 
@@ -432,7 +505,7 @@ function writeToolStubs(binDir, dir) {
   writeExecutable(
     join(binDir, 'git'),
     `#!/usr/bin/env node
-import {appendFileSync, existsSync} from 'node:fs';
+import {appendFileSync, existsSync, readFileSync} from 'node:fs';
 
 const allArgs = process.argv.slice(2);
 appendFileSync(
@@ -458,6 +531,9 @@ if (command === 'fetch') {
       process.exit(1);
     }
     appendFileSync(${JSON.stringify(join(dir, 'unshallow-called'))}, '1');
+  }
+  if (args.some(arg => arg.startsWith('--deepen='))) {
+    appendFileSync(${JSON.stringify(join(dir, 'deepen-called'))}, '1');
   }
   process.exit(0);
 }
@@ -507,7 +583,25 @@ if (command === 'rev-list') {
   if (process.env.FAKE_GIT_EMPTY_REV_LIST) {
     process.exit(0);
   }
-  process.stdout.write(${JSON.stringify(`${firstCommit}\n${secondCommit}\n`)});
+  const normal = ${JSON.stringify(`${firstCommit}\n${secondCommit}\n`)};
+  const withPhantom = ${JSON.stringify(`${phantomCommit}\n${firstCommit}\n${secondCommit}\n`)};
+  if (process.env.FAKE_GIT_ALWAYS_MISMATCH) {
+    process.stdout.write(withPhantom);
+    process.exit(0);
+  }
+  const requiredDeepens = Number(process.env.FAKE_GIT_REQUIRE_DEEPENS || 0);
+  if (requiredDeepens > 0) {
+    const deepenCallsPath = ${JSON.stringify(join(dir, 'deepen-called'))};
+    const deepenCalls = existsSync(deepenCallsPath)
+      ? readFileSync(deepenCallsPath, 'utf8').length
+      : 0;
+    const unshallowed = existsSync(${JSON.stringify(join(dir, 'unshallow-called'))});
+    if (!unshallowed && deepenCalls < requiredDeepens) {
+      process.stdout.write(withPhantom);
+      process.exit(0);
+    }
+  }
+  process.stdout.write(normal);
   process.exit(0);
 }
 
