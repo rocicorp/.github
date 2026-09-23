@@ -15,7 +15,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: '${{ github.workflow }} @ ${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.run_id }}'
+  group: "${{ github.workflow }} @ ${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.run_id }}"
   cancel-in-progress: true
 
 jobs:
@@ -31,7 +31,7 @@ jobs:
 
       - name: Verify signed commit authors
         if: github.event_name == 'pull_request'
-        uses: rocicorp/.github/.github/actions/verify-signed-commit-authors@2e203740c856d1aafcf8ea31c7923eb76e2288ed
+        uses: rocicorp/.github/.github/actions/verify-signed-commit-authors@06a0ebd29781171bf219e601f94af752cad3891a
         with:
           enforce: true
           github-token: ${{ github.token }}
