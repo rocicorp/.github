@@ -4,6 +4,7 @@
 #   scripts/sign-branch.sh [<branch>] [--yes] [--no-push]
 #   scripts/sign-branch.sh <pr-number | pr-url> [--yes] [--no-push]
 #   scripts/sign-branch.sh --pr [--yes] [--no-push]
+#   scripts/sign-branch.sh --branch <branch> ...   (a branch whose name is all digits)
 #
 # With no branch, the ten most recently pushed branches on origin are listed and one is
 # picked with the arrow keys (or j/k, a digit, Enter; q to quit). With --pr and no
@@ -51,10 +52,11 @@ self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 die() { echo "sign-branch: $*" >&2; exit 1; }
 usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$self"; }
 
-target=; pr_mode=0; assume_yes=0; push=1
+target=; pr_mode=0; branch_mode=0; assume_yes=0; push=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --pr)      pr_mode=1; shift ;;
+    --branch)  branch_mode=1; shift ;;
     --yes|-y)  assume_yes=1; shift ;;
     --no-push) push=0; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -63,8 +65,10 @@ while [ $# -gt 0 ]; do
                target=$1; shift ;;
   esac
 done
+[ "$pr_mode" = 0 ] || [ "$branch_mode" = 0 ] || die "--pr and --branch are exclusive"
 # A number, #number or pull request URL names a PR; anything else is a branch on origin.
-case "$target" in
+# --branch forces the latter, for a branch whose name is all digits.
+[ "$branch_mode" = 1 ] || case "$target" in
   https://*/pull/[0-9]*)           pr_mode=1 ;;
   '' | '#' | *[!0-9#]* | ?*'#'*)   ;;
   *)                               pr_mode=1; target=${target#\#} ;;
@@ -121,12 +125,13 @@ if [ "$pr_mode" = 1 ]; then
     [ -t 0 ] && [ -t 1 ] || die "no pull request given, and no terminal to pick one from"
     echo "fetching open pull requests…"
     nums=(); labels=()
-    while IFS=$'\t' read -r num author name title; do
+    while IFS=$'\t' read -r num author head title; do
       nums+=("$num")
-      labels+=("$(printf '#%-6s %-16.16s  %-30.30s  %.40s' "$num" "$author" "$name" "$title")")
+      labels+=("$(printf '#%-6s %-16.16s  %-40.40s  %.40s' "$num" "$author" "$head" "$title")")
     done < <(gh pr list --state open --limit "$recent" --search 'sort:updated-desc' \
-               --json number,author,headRefName,title \
-               --jq '.[] | [.number, .author.login, .headRefName, .title] | @tsv')
+               --json number,author,headRepositoryOwner,headRefName,title \
+               --jq '.[] | [.number, .author.login,
+                            .headRepositoryOwner.login + ":" + .headRefName, .title] | @tsv')
     [ "${#nums[@]}" -gt 0 ] || die "no open pull requests"
     echo
     echo "which pull request to sign?  (${#nums[@]} most recently updated)"
@@ -135,32 +140,46 @@ if [ "$pr_mode" = 1 ]; then
     echo
   fi
 
-  IFS=$'\t' read -r branch default head_repo base_repo state cross can_modify < <(
+  # Unit-separated, not tab-separated: tab is IFS whitespace, so an empty field would
+  # collapse into its neighbour and shift every later one.
+  IFS=$'\x1f' read -r branch base_branch head_repo host base_repo state cross can_modify < <(
     gh pr view "$target" \
       --json headRefName,baseRefName,headRepositoryOwner,headRepository,url,state,isCrossRepository,maintainerCanModify \
-      --jq '[.headRefName, .baseRefName, .headRepositoryOwner.login + "/" + .headRepository.name,
-             (.url | capture("github.com/(?<r>[^/]+/[^/]+)/pull").r),
-             .state, .isCrossRepository, .maintainerCanModify] | @tsv'
+      --jq '(.url | capture("^https?://(?<h>[^/]+)/(?<r>[^/]+/[^/]+)/pull/")) as $u
+            | [.headRefName, .baseRefName,
+               (if .headRepository then .headRepositoryOwner.login + "/" + .headRepository.name
+                else "" end),
+               $u.h, $u.r, .state, .isCrossRepository, .maintainerCanModify]
+            | map(tostring) | join("\u001f")'
   ) || die "cannot read pull request $target"
   [ "$state" = OPEN ] || die "pull request $target is $state"
+  [ -n "$head_repo" ] || die "pull request $target's head repository no longer exists"
   [ "$cross" != true ] || [ "$can_modify" = true ] \
     || die "pull request $target is from a fork that does not allow maintainer edits"
-  [ "$cross" = true ] || [ "$branch" != "$default" ] \
-    || die "$branch IS the pull request's base branch — refusing to rewrite it"
 
-  # Head and base by URL rather than a remote, since a fork's head usually has none; in
-  # origin's protocol, so whatever credentials origin uses apply.
+  # Head and base by URL rather than a remote, since a fork's head usually has none; on the
+  # PR's host, in origin's protocol, so whatever credentials origin uses apply.
   case "$(git remote get-url origin 2>/dev/null || true)" in
-    https://*) repo_url() { echo "https://github.com/$1.git"; } ;;
-    *)         repo_url() { echo "git@github.com:$1.git"; } ;;
+    https://*) repo_url() { echo "https://$host/$1.git"; } ;;
+    *)         repo_url() { echo "git@$host:$1.git"; } ;;
   esac
   src=$(repo_url "$head_repo"); base_src=$(repo_url "$base_repo"); where=$head_repo
+
+  # A PR from a branch of the base repo itself may have that repo's default branch as its
+  # head (main into a release branch, say); that is shared history, never ours to rewrite.
+  # A fork's default branch is the contributor's own, so it is fair game.
+  if [ "$cross" != true ]; then
+    head_default=$(git ls-remote --symref "$src" HEAD | sed -n 's|^ref: refs/heads/||p' | awk '{print $1}')
+    [ -n "$head_default" ] || die "cannot determine $head_repo's default branch"
+    [ "$branch" != "$head_default" ] \
+      || die "$branch IS $head_repo's default branch — refusing to rewrite it"
+  fi
 else
   src=origin; base_src=origin; where=origin
   # Ask the remote what its default branch is, rather than reading a local ref: this
   # works in a bare or fresh clone that has no refs/remotes/* at all, and cannot go stale.
-  default=$(git ls-remote --symref origin HEAD | sed -n 's|^ref: refs/heads/||p' | awk '{print $1}')
-  [ -n "$default" ] || die "cannot determine origin's default branch"
+  base_branch=$(git ls-remote --symref origin HEAD | sed -n 's|^ref: refs/heads/||p' | awk '{print $1}')
+  [ -n "$base_branch" ] || die "cannot determine origin's default branch"
   branch=$target
 
   # No branch named: offer the most recently pushed branches on origin. Fetched into
@@ -172,14 +191,14 @@ else
       || die "cannot fetch branches from origin"
     names=(); labels=()
     while IFS=$'\t' read -r name date author subject; do
-      case "$name" in "$default" | HEAD) continue ;; esac
+      case "$name" in "$base_branch" | HEAD) continue ;; esac
       names+=("$name")
       labels+=("$(printf '%-36.36s  %-14.14s  %-16.16s  %.40s' "$name" "$date" "$author" "$subject")")
       [ "${#names[@]}" -lt "$recent" ] || break
     done < <(git for-each-ref --sort=-committerdate \
                --format='%(refname:lstrip=3)%09%(committerdate:relative)%09%(authorname)%09%(contents:subject)' \
                refs/remotes/origin/)
-    [ "${#names[@]}" -gt 0 ] || die "origin has no branches other than $default"
+    [ "${#names[@]}" -gt 0 ] || die "origin has no branches other than $base_branch"
     echo
     echo "which branch to sign?  (${#names[@]} most recently pushed; tip author shown)"
     menu "${labels[@]}"
@@ -187,22 +206,22 @@ else
     echo
   fi
 
-  [ "$branch" != "$default" ] || die "$branch IS origin's default branch — refusing to rewrite it"
+  [ "$branch" != "$base_branch" ] || die "$branch IS origin's default branch — refusing to rewrite it"
 fi
 
 echo "fetching $where…"
 # FETCH_HEAD, not origin/<branch>: a bare clone has no remote-tracking refs, and it is
 # precisely the SHA just fetched — which is what the push lease below must pin. Fetch the
 # default branch first, since each fetch overwrites FETCH_HEAD.
-git fetch --quiet "$base_src" "$default" || die "cannot fetch $default"
-default_sha=$(git rev-parse FETCH_HEAD^{commit})
+git fetch --quiet "$base_src" "$base_branch" || die "cannot fetch $base_branch"
+base_sha=$(git rev-parse FETCH_HEAD^{commit})
 git fetch --quiet "$src" "$branch" || die "no branch '$branch' on $where"
 head_sha=$(git rev-parse FETCH_HEAD^{commit})
 
 # The fork point, so only what this branch added is ever in scope.
-base=$(git merge-base "$default_sha" "$head_sha") || die "$branch shares no history with $default"
+base=$(git merge-base "$base_sha" "$head_sha") || die "$branch shares no history with $base_branch"
 [ "$(git rev-list --count "$base..$head_sha")" -gt 0 ] \
-  || die "$branch adds nothing on top of $default — nothing to do"
+  || die "$branch adds nothing on top of $base_branch — nothing to do"
 
 # The raw object is the signature check: `git log --format=%G?` only reports a *verified*
 # signature, which needs gpg.ssh.allowedSignersFile set, and its absence would otherwise
@@ -222,7 +241,7 @@ done < <(git rev-list --reverse "$base..$head_sha")
 
 upstream=$(git rev-parse "$first_bad^")
 echo
-echo "branch: $where:$branch    forked from: $default    author: $me_name <$me_email>"
+echo "branch: $where:$branch    forked from: $base_branch    author: $me_name <$me_email>"
 if [ "$(git rev-list --count "$base..$upstream")" -gt 0 ]; then
   echo "keeping untouched:"
   git log --reverse --format='    %h  %an  %s' "$base..$upstream"
@@ -231,7 +250,8 @@ echo "rebuilding:"
 git log --reverse --format='    %h  %an  %s' "$upstream..$head_sha"
 echo
 
-if [ "$assume_yes" != 1 ]; then
+# --no-push only writes a local ref, so there is nothing to confirm.
+if [ "$assume_yes" != 1 ] && [ "$push" = 1 ]; then
   printf 'rebuild and force-push to %s:%s? [y/N] ' "$where" "$branch"
   read -r reply
   case "$reply" in y | Y | yes | YES) ;; *) die "aborted" ;; esac
