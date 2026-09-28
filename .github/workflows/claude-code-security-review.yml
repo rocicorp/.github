@@ -1,0 +1,67 @@
+# Org-wide required workflow enforced by the org ruleset "workflows" rule.
+#
+# Runs Anthropic's Claude Code security review on trusted same-repository PRs.
+# Fork PRs intentionally no-op: the upstream action is not hardened against
+# prompt injection, and GitHub does not provide org secrets to forked
+# pull_request workflows.
+#
+# The organization must expose a CLAUDE_API_KEY secret to every targeted repo.
+# The key must be enabled for both the Claude API and Claude Code usage.
+name: Claude Code Security Review
+
+on:
+  pull_request:
+  merge_group:
+
+permissions: {}
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.run_id }}'
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Claude Code Security Review
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # Needed for PR comments on same-repository PRs.
+    steps:
+      - name: Merge group no-op
+        if: github.event_name == 'merge_group'
+        run: |
+          echo "merge_group event: pull request changes are reviewed before entering the queue."
+
+      - name: Fork PR no-op
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::notice::Skipping Claude Code Security Review for a fork PR."
+          echo "The upstream action is not hardened against prompt injection, and org secrets are not available to forked pull_request workflows."
+
+      - name: Check Claude API key
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        shell: bash
+        env:
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+        run: |
+          if [ -z "$CLAUDE_API_KEY" ]; then
+            echo "::error::CLAUDE_API_KEY is not configured for this repository."
+            echo "Configure a CLAUDE_API_KEY organization secret and grant this repository access before enabling the required workflow."
+            exit 1
+          fi
+
+      - name: Check out PR head
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Run Claude Code security review
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: anthropics/claude-code-security-review@0c6a49f1fa56a1d472575da86a94dbc1edb78eda
+        with:
+          comment-pr: true
+          upload-results: true
+          claude-api-key: ${{ secrets.CLAUDE_API_KEY }}
