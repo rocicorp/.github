@@ -2,9 +2,21 @@
 # sign-branch — take over a branch's commits as their author, signed with YOUR key.
 #
 #   scripts/sign-branch.sh [<branch>] [--yes] [--no-push]
+#   scripts/sign-branch.sh <pr-number | pr-url> [--yes] [--no-push]
+#   scripts/sign-branch.sh --pr [--yes] [--no-push]
 #
 # With no branch, the ten most recently pushed branches on origin are listed and one is
-# picked with the arrow keys (or j/k, a digit, Enter; q to quit).
+# picked with the arrow keys (or j/k, a digit, Enter; q to quit). With --pr and no
+# number, the ten most recently updated open pull requests are listed instead.
+#
+# A pull request (a number, `#123`, or its URL; needs the `gh` CLI) is signed wherever its
+# branch lives, a contributor's fork included: its head and base are fetched and pushed by
+# URL, which works for a fork when the PR allows maintainer edits. A plain branch name is
+# looked up on origin.
+#
+# As git aliases, from any repo:
+#   git config --global alias.sign-branch '!<this clone>/scripts/sign-branch.sh'
+#   git config --global alias.sign-pr '!<this clone>/scripts/sign-branch.sh --pr'
 #
 # The rocicorp org requires every commit to be SSH-signed by a key in this repo's
 # `.github/signing/allowed_signers`; the org-wide required workflow
@@ -24,9 +36,9 @@
 # bare or blobless clone.
 #
 # Only the named branch's OWN commits are touched: the range is everything it added since
-# it forked from origin's default branch, so shared history can never be rewritten. That
-# fork point is derived (`ls-remote --symref` for the default branch, then `merge-base`),
-# never asked for.
+# it forked from origin's default branch (a PR's base branch), so shared history can never
+# be rewritten. That fork point is derived (`ls-remote --symref` for the default branch,
+# or the PR's base, then `merge-base`), never asked for.
 #
 # Within that range it starts at the FIRST commit that needs rebuilding — one whose author
 # is not you, or that carries no signature — and runs to the tip, so commits already
@@ -39,18 +51,26 @@ self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 die() { echo "sign-branch: $*" >&2; exit 1; }
 usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$self"; }
 
-branch=; assume_yes=0; push=1
+target=; pr_mode=0; assume_yes=0; push=1
 while [ $# -gt 0 ]; do
   case "$1" in
+    --pr)      pr_mode=1; shift ;;
     --yes|-y)  assume_yes=1; shift ;;
     --no-push) push=0; shift ;;
     -h|--help) usage; exit 0 ;;
     -*)        die "unknown flag: $1" ;;
-    *)         [ -z "$branch" ] || die "only one branch, got '$branch' and '$1'"
-               branch=$1; shift ;;
+    *)         [ -z "$target" ] || die "only one branch or PR, got '$target' and '$1'"
+               target=$1; shift ;;
   esac
 done
+# A number, #number or pull request URL names a PR; anything else is a branch on origin.
+case "$target" in
+  https://*/pull/[0-9]*)           pr_mode=1 ;;
+  '' | '#' | *[!0-9#]* | ?*'#'*)   ;;
+  *)                               pr_mode=1; target=${target#\#} ;;
+esac
 git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+[ "$pr_mode" = 0 ] || command -v gh >/dev/null || die "signing a pull request needs the gh CLI"
 
 # Fail before building anything if signing cannot produce what the org accepts.
 me_name=$(git config user.name)   || die "no user.name configured"
@@ -60,11 +80,6 @@ git config --get user.signingkey >/dev/null \
 [ "$(git config --default openpgp --get gpg.format)" = ssh ] \
   || die "gpg.format is not 'ssh' — allowed_signers only accepts SSH signatures:
     git config --global gpg.format ssh"
-
-# Ask the remote what its default branch is, rather than reading a local ref: this works
-# in a bare or fresh clone that has no refs/remotes/* at all, and cannot go stale.
-default=$(git ls-remote --symref origin HEAD | sed -n 's|^ref: refs/heads/||p' | awk '{print $1}')
-[ -n "$default" ] || die "cannot determine origin's default branch"
 
 # Arrow-key menu on the terminal: sets $picked to the chosen index. Up/Down or k/j move,
 # a digit jumps, Enter picks, q or Esc aborts. Redraws in place with plain escapes so it
@@ -97,40 +112,91 @@ menu() {
   picked=$cur
 }
 
-# No branch named: offer the most recently pushed branches on origin. Fetched into
-# refs/remotes/origin/* explicitly so this also works in a bare clone, which has none.
 recent=10
-if [ -z "$branch" ]; then
-  [ -t 0 ] && [ -t 1 ] || die "no branch given, and no terminal to pick one from"
-  echo "fetching branches from origin…"
-  git fetch --quiet --prune origin '+refs/heads/*:refs/remotes/origin/*' \
-    || die "cannot fetch branches from origin"
-  names=(); labels=()
-  while IFS=$'\t' read -r name date author subject; do
-    case "$name" in "$default" | HEAD) continue ;; esac
-    names+=("$name")
-    labels+=("$(printf '%-36.36s  %-14.14s  %-16.16s  %.40s' "$name" "$date" "$author" "$subject")")
-    [ "${#names[@]}" -lt "$recent" ] || break
-  done < <(git for-each-ref --sort=-committerdate \
-             --format='%(refname:lstrip=3)%09%(committerdate:relative)%09%(authorname)%09%(contents:subject)' \
-             refs/remotes/origin/)
-  [ "${#names[@]}" -gt 0 ] || die "origin has no branches other than $default"
-  echo
-  echo "which branch to sign?  (${#names[@]} most recently pushed; tip author shown)"
-  menu "${labels[@]}"
-  branch=${names[$picked]}
-  echo
+branch=
+
+if [ "$pr_mode" = 1 ]; then
+  # --pr with no number: offer the most recently updated open pull requests.
+  if [ -z "$target" ]; then
+    [ -t 0 ] && [ -t 1 ] || die "no pull request given, and no terminal to pick one from"
+    echo "fetching open pull requests…"
+    nums=(); labels=()
+    while IFS=$'\t' read -r num author name title; do
+      nums+=("$num")
+      labels+=("$(printf '#%-6s %-16.16s  %-30.30s  %.40s' "$num" "$author" "$name" "$title")")
+    done < <(gh pr list --state open --limit "$recent" --search 'sort:updated-desc' \
+               --json number,author,headRefName,title \
+               --jq '.[] | [.number, .author.login, .headRefName, .title] | @tsv')
+    [ "${#nums[@]}" -gt 0 ] || die "no open pull requests"
+    echo
+    echo "which pull request to sign?  (${#nums[@]} most recently updated)"
+    menu "${labels[@]}"
+    target=${nums[$picked]}
+    echo
+  fi
+
+  IFS=$'\t' read -r branch default head_repo base_repo state cross can_modify < <(
+    gh pr view "$target" \
+      --json headRefName,baseRefName,headRepositoryOwner,headRepository,url,state,isCrossRepository,maintainerCanModify \
+      --jq '[.headRefName, .baseRefName, .headRepositoryOwner.login + "/" + .headRepository.name,
+             (.url | capture("github.com/(?<r>[^/]+/[^/]+)/pull").r),
+             .state, .isCrossRepository, .maintainerCanModify] | @tsv'
+  ) || die "cannot read pull request $target"
+  [ "$state" = OPEN ] || die "pull request $target is $state"
+  [ "$cross" != true ] || [ "$can_modify" = true ] \
+    || die "pull request $target is from a fork that does not allow maintainer edits"
+  [ "$cross" = true ] || [ "$branch" != "$default" ] \
+    || die "$branch IS the pull request's base branch — refusing to rewrite it"
+
+  # Head and base by URL rather than a remote, since a fork's head usually has none; in
+  # origin's protocol, so whatever credentials origin uses apply.
+  case "$(git remote get-url origin 2>/dev/null || true)" in
+    https://*) repo_url() { echo "https://github.com/$1.git"; } ;;
+    *)         repo_url() { echo "git@github.com:$1.git"; } ;;
+  esac
+  src=$(repo_url "$head_repo"); base_src=$(repo_url "$base_repo"); where=$head_repo
+else
+  src=origin; base_src=origin; where=origin
+  # Ask the remote what its default branch is, rather than reading a local ref: this
+  # works in a bare or fresh clone that has no refs/remotes/* at all, and cannot go stale.
+  default=$(git ls-remote --symref origin HEAD | sed -n 's|^ref: refs/heads/||p' | awk '{print $1}')
+  [ -n "$default" ] || die "cannot determine origin's default branch"
+  branch=$target
+
+  # No branch named: offer the most recently pushed branches on origin. Fetched into
+  # refs/remotes/origin/* explicitly so this also works in a bare clone, which has none.
+  if [ -z "$branch" ]; then
+    [ -t 0 ] && [ -t 1 ] || die "no branch given, and no terminal to pick one from"
+    echo "fetching branches from origin…"
+    git fetch --quiet --prune origin '+refs/heads/*:refs/remotes/origin/*' \
+      || die "cannot fetch branches from origin"
+    names=(); labels=()
+    while IFS=$'\t' read -r name date author subject; do
+      case "$name" in "$default" | HEAD) continue ;; esac
+      names+=("$name")
+      labels+=("$(printf '%-36.36s  %-14.14s  %-16.16s  %.40s' "$name" "$date" "$author" "$subject")")
+      [ "${#names[@]}" -lt "$recent" ] || break
+    done < <(git for-each-ref --sort=-committerdate \
+               --format='%(refname:lstrip=3)%09%(committerdate:relative)%09%(authorname)%09%(contents:subject)' \
+               refs/remotes/origin/)
+    [ "${#names[@]}" -gt 0 ] || die "origin has no branches other than $default"
+    echo
+    echo "which branch to sign?  (${#names[@]} most recently pushed; tip author shown)"
+    menu "${labels[@]}"
+    branch=${names[$picked]}
+    echo
+  fi
+
+  [ "$branch" != "$default" ] || die "$branch IS origin's default branch — refusing to rewrite it"
 fi
 
-[ "$branch" != "$default" ] || die "$branch IS origin's default branch — refusing to rewrite it"
-
-echo "fetching origin…"
+echo "fetching $where…"
 # FETCH_HEAD, not origin/<branch>: a bare clone has no remote-tracking refs, and it is
 # precisely the SHA just fetched — which is what the push lease below must pin. Fetch the
 # default branch first, since each fetch overwrites FETCH_HEAD.
-git fetch --quiet origin "$default" || die "cannot fetch origin/$default"
+git fetch --quiet "$base_src" "$default" || die "cannot fetch $default"
 default_sha=$(git rev-parse FETCH_HEAD^{commit})
-git fetch --quiet origin "$branch" || die "no branch '$branch' on origin"
+git fetch --quiet "$src" "$branch" || die "no branch '$branch' on $where"
 head_sha=$(git rev-parse FETCH_HEAD^{commit})
 
 # The fork point, so only what this branch added is ever in scope.
@@ -156,7 +222,7 @@ done < <(git rev-list --reverse "$base..$head_sha")
 
 upstream=$(git rev-parse "$first_bad^")
 echo
-echo "branch: $branch    forked from: $default    author: $me_name <$me_email>"
+echo "branch: $where:$branch    forked from: $default    author: $me_name <$me_email>"
 if [ "$(git rev-list --count "$base..$upstream")" -gt 0 ]; then
   echo "keeping untouched:"
   git log --reverse --format='    %h  %an  %s' "$base..$upstream"
@@ -166,7 +232,7 @@ git log --reverse --format='    %h  %an  %s' "$upstream..$head_sha"
 echo
 
 if [ "$assume_yes" != 1 ]; then
-  printf 'rebuild and force-push to origin/%s? [y/N] ' "$branch"
+  printf 'rebuild and force-push to %s:%s? [y/N] ' "$where" "$branch"
   read -r reply
   case "$reply" in y | Y | yes | YES) ;; *) die "aborted" ;; esac
 fi
@@ -203,13 +269,15 @@ done < <(git rev-list --reverse "$upstream..$head_sha")
 staging=refs/sign-branch/$branch
 git update-ref "$staging" "$new"
 
+# The lease names the full ref: with a URL rather than a remote there is no
+# remote-tracking ref for a short name to resolve against.
 if [ "$push" != 1 ]; then
   echo "not pushed (--no-push) — rebuilt chain at $staging ($(git rev-parse --short "$new"))"
   echo "  inspect: git log $base..$staging"
-  echo "  push:    git push --force-with-lease=$branch:$head_sha origin $staging:refs/heads/$branch"
+  echo "  push:    git push --force-with-lease=refs/heads/$branch:$head_sha $src $staging:refs/heads/$branch"
   exit 0
 fi
 
-git push --force-with-lease="$branch:$head_sha" origin "$new:refs/heads/$branch"
+git push --force-with-lease="refs/heads/$branch:$head_sha" "$src" "$new:refs/heads/$branch"
 git update-ref -d "$staging"
 echo "pushed — your local $branch is now behind; git fetch when you next need it"
