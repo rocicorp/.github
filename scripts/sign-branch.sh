@@ -185,9 +185,11 @@ while read -r sha; do
     trailer=(--trailer "Co-authored-by: $(git log -1 --format='%an' "$sha") <$orig_email>")
   fi
   # ${arr[@]+...} so an empty array is not an unbound-variable error under bash 3.2,
-  # which is still what macOS ships as /bin/bash.
+  # which is still what macOS ships as /bin/bash. addIfDifferent, not doNothing:
+  # --if-exists matches on the key alone, so doNothing dropped the original author
+  # whenever the message already had any Co-authored-by (an agent's, say).
   msg=$(git log -1 --format='%B' "$sha" \
-        | git interpret-trailers --if-exists doNothing ${trailer[@]+"${trailer[@]}"})
+        | git interpret-trailers --if-exists addIfDifferent ${trailer[@]+"${trailer[@]}"})
   new=$(
     export GIT_AUTHOR_NAME=$me_name GIT_AUTHOR_EMAIL=$me_email
     export GIT_AUTHOR_DATE=$(git log -1 --format='%aI' "$sha")
