@@ -209,7 +209,7 @@ else
   [ "$branch" != "$base_branch" ] || die "$branch IS origin's default branch — refusing to rewrite it"
 fi
 
-echo "fetching $where…"
+echo "fetching ${where}…"
 # FETCH_HEAD, not origin/<branch>: a bare clone has no remote-tracking refs, and it is
 # precisely the SHA just fetched — which is what the push lease below must pin. Fetch the
 # default branch first, since each fetch overwrites FETCH_HEAD.
