@@ -2,9 +2,22 @@
 # sign-branch — take over a branch's commits as their author, signed with YOUR key.
 #
 #   scripts/sign-branch.sh [<branch>] [--yes] [--no-push]
+#   scripts/sign-branch.sh <pr-number | pr-url> [--yes] [--no-push]
+#   scripts/sign-branch.sh --pr [--yes] [--no-push]
+#   scripts/sign-branch.sh --branch <branch> ...   (a branch whose name is all digits)
 #
 # With no branch, the ten most recently pushed branches on origin are listed and one is
-# picked with the arrow keys (or j/k, a digit, Enter; q to quit).
+# picked with the arrow keys (or j/k, a digit, Enter; q to quit). With --pr and no
+# number, the ten most recently updated open pull requests are listed instead.
+#
+# A pull request (a number, `#123`, or its URL; needs the `gh` CLI) is signed wherever its
+# branch lives, a contributor's fork included: its head and base are fetched and pushed by
+# URL, which works for a fork when the PR allows maintainer edits. A plain branch name is
+# looked up on origin.
+#
+# As git aliases, from any repo:
+#   git config --global alias.sign-branch '!<this clone>/scripts/sign-branch.sh'
+#   git config --global alias.sign-pr '!<this clone>/scripts/sign-branch.sh --pr'
 #
 # The rocicorp org requires every commit to be SSH-signed by a key in this repo's
 # `.github/signing/allowed_signers`; the org-wide required workflow
@@ -24,33 +37,51 @@
 # bare or blobless clone.
 #
 # Only the named branch's OWN commits are touched: the range is everything it added since
-# it forked from origin's default branch, so shared history can never be rewritten. That
-# fork point is derived (`ls-remote --symref` for the default branch, then `merge-base`),
-# never asked for.
+# it forked from origin's default branch (a PR's base branch), so shared history can never
+# be rewritten. That fork point is derived (`ls-remote --symref` for the default branch,
+# or the PR's base, then `merge-base`), never asked for.
 #
-# Within that range it starts at the FIRST commit that needs rebuilding — one whose author
-# is not you, or that carries no signature — and runs to the tip, so commits already
-# authored and signed by you keep their SHA and their completed checks. Merges are refused
-# rather than flattened. It force-pushes, with the lease pinned to the SHA it fetched, so
-# it asks first unless you pass --yes.
+# Within that range it starts at the FIRST commit that needs rebuilding — one CI would not
+# accept as yours: anything but a good signature whose principal in this clone's
+# allowed_signers is your user.email — and runs to the tip, so commits already signed by
+# you keep their SHA and their completed checks. Merges are refused rather than flattened.
+# It force-pushes, with the lease pinned to the SHA it fetched, so it asks first unless
+# you pass --yes.
+#
+# A stacked PR whose base branch has been rewritten since (signed with this, say) still
+# starts with that base's old commits. They are dropped, and the PR's own commits rebuilt
+# onto the base's tip, when each has a patch-equivalent there and the last has exactly the
+# base tip's tree, so every rebuilt commit keeps its tree and diff. Sign a stack from the
+# bottom up: after a push it names the PRs stacked on the branch, which need signing next.
 set -euo pipefail
 
 self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 die() { echo "sign-branch: $*" >&2; exit 1; }
 usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$self"; }
 
-branch=; assume_yes=0; push=1
+target=; pr_mode=0; branch_mode=0; assume_yes=0; push=1
 while [ $# -gt 0 ]; do
   case "$1" in
+    --pr)      pr_mode=1; shift ;;
+    --branch)  branch_mode=1; shift ;;
     --yes|-y)  assume_yes=1; shift ;;
     --no-push) push=0; shift ;;
     -h|--help) usage; exit 0 ;;
     -*)        die "unknown flag: $1" ;;
-    *)         [ -z "$branch" ] || die "only one branch, got '$branch' and '$1'"
-               branch=$1; shift ;;
+    *)         [ -z "$target" ] || die "only one branch or PR, got '$target' and '$1'"
+               target=$1; shift ;;
   esac
 done
+[ "$pr_mode" = 0 ] || [ "$branch_mode" = 0 ] || die "--pr and --branch are exclusive"
+# A number, #number or pull request URL names a PR; anything else is a branch on origin.
+# --branch forces the latter, for a branch whose name is all digits.
+[ "$branch_mode" = 1 ] || case "$target" in
+  https://*/pull/[0-9]*)           pr_mode=1 ;;
+  '' | '#' | *[!0-9#]* | ?*'#'*)   ;;
+  *)                               pr_mode=1; target=${target#\#} ;;
+esac
 git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+[ "$pr_mode" = 0 ] || command -v gh >/dev/null || die "signing a pull request needs the gh CLI"
 
 # Fail before building anything if signing cannot produce what the org accepts.
 me_name=$(git config user.name)   || die "no user.name configured"
@@ -60,11 +91,9 @@ git config --get user.signingkey >/dev/null \
 [ "$(git config --default openpgp --get gpg.format)" = ssh ] \
   || die "gpg.format is not 'ssh' — allowed_signers only accepts SSH signatures:
     git config --global gpg.format ssh"
-
-# Ask the remote what its default branch is, rather than reading a local ref: this works
-# in a bare or fresh clone that has no refs/remotes/* at all, and cannot go stale.
-default=$(git ls-remote --symref origin HEAD | sed -n 's|^ref: refs/heads/||p' | awk '{print $1}')
-[ -n "$default" ] || die "cannot determine origin's default branch"
+# The allow-list CI verifies against, from this clone (scripts/ sits at its root).
+allowed_signers=$(dirname "$(dirname "$self")")/.github/signing/allowed_signers
+[ -f "$allowed_signers" ] || die "cannot find $allowed_signers"
 
 # Arrow-key menu on the terminal: sets $picked to the chosen index. Up/Down or k/j move,
 # a digit jumps, Enter picks, q or Esc aborts. Redraws in place with plain escapes so it
@@ -97,76 +126,169 @@ menu() {
   picked=$cur
 }
 
-# No branch named: offer the most recently pushed branches on origin. Fetched into
-# refs/remotes/origin/* explicitly so this also works in a bare clone, which has none.
 recent=10
-if [ -z "$branch" ]; then
-  [ -t 0 ] && [ -t 1 ] || die "no branch given, and no terminal to pick one from"
-  echo "fetching branches from origin…"
-  git fetch --quiet --prune origin '+refs/heads/*:refs/remotes/origin/*' \
-    || die "cannot fetch branches from origin"
-  names=(); labels=()
-  while IFS=$'\t' read -r name date author subject; do
-    case "$name" in "$default" | HEAD) continue ;; esac
-    names+=("$name")
-    labels+=("$(printf '%-36.36s  %-14.14s  %-16.16s  %.40s' "$name" "$date" "$author" "$subject")")
-    [ "${#names[@]}" -lt "$recent" ] || break
-  done < <(git for-each-ref --sort=-committerdate \
-             --format='%(refname:lstrip=3)%09%(committerdate:relative)%09%(authorname)%09%(contents:subject)' \
-             refs/remotes/origin/)
-  [ "${#names[@]}" -gt 0 ] || die "origin has no branches other than $default"
-  echo
-  echo "which branch to sign?  (${#names[@]} most recently pushed; tip author shown)"
-  menu "${labels[@]}"
-  branch=${names[$picked]}
-  echo
+branch=
+
+if [ "$pr_mode" = 1 ]; then
+  # --pr with no number: offer the most recently updated open pull requests.
+  if [ -z "$target" ]; then
+    [ -t 0 ] && [ -t 1 ] || die "no pull request given, and no terminal to pick one from"
+    echo "fetching open pull requests…"
+    nums=(); labels=()
+    while IFS=$'\t' read -r num author head title; do
+      nums+=("$num")
+      labels+=("$(printf '#%-6s %-16.16s  %-40.40s  %.40s' "$num" "$author" "$head" "$title")")
+    done < <(gh pr list --state open --limit "$recent" --search 'sort:updated-desc' \
+               --json number,author,headRepositoryOwner,headRefName,title \
+               --jq '.[] | [.number, .author.login,
+                            .headRepositoryOwner.login + ":" + .headRefName, .title] | @tsv')
+    [ "${#nums[@]}" -gt 0 ] || die "no open pull requests"
+    echo
+    echo "which pull request to sign?  (${#nums[@]} most recently updated)"
+    menu "${labels[@]}"
+    target=${nums[$picked]}
+    echo
+  fi
+
+  # Unit-separated, not tab-separated: tab is IFS whitespace, so an empty field would
+  # collapse into its neighbour and shift every later one.
+  IFS=$'\x1f' read -r branch base_branch head_repo host base_repo state cross can_modify < <(
+    gh pr view "$target" \
+      --json headRefName,baseRefName,headRepositoryOwner,headRepository,url,state,isCrossRepository,maintainerCanModify \
+      --jq '(.url | capture("^https?://(?<h>[^/]+)/(?<r>[^/]+/[^/]+)/pull/")) as $u
+            | [.headRefName, .baseRefName,
+               (if .headRepository then .headRepositoryOwner.login + "/" + .headRepository.name
+                else "" end),
+               $u.h, $u.r, .state, .isCrossRepository, .maintainerCanModify]
+            | map(tostring) | join("\u001f")'
+  ) || die "cannot read pull request $target"
+  [ "$state" = OPEN ] || die "pull request $target is $state"
+  [ -n "$head_repo" ] || die "pull request $target's head repository no longer exists"
+  [ "$cross" != true ] || [ "$can_modify" = true ] \
+    || die "pull request $target is from a fork that does not allow maintainer edits"
+
+  # Head and base by URL rather than a remote, since a fork's head usually has none; on the
+  # PR's host, in origin's protocol, so whatever credentials origin uses apply.
+  case "$(git remote get-url origin 2>/dev/null || true)" in
+    https://*) repo_url() { echo "https://$host/$1.git"; } ;;
+    *)         repo_url() { echo "git@$host:$1.git"; } ;;
+  esac
+  src=$(repo_url "$head_repo"); base_src=$(repo_url "$base_repo"); where=$head_repo
+
+  # A PR from a branch of the base repo itself may have that repo's default branch as its
+  # head (main into a release branch, say); that is shared history, never ours to rewrite.
+  # A fork's default branch is the contributor's own, so it is fair game.
+  if [ "$cross" != true ]; then
+    head_default=$(git ls-remote --symref "$src" HEAD | sed -n 's|^ref: refs/heads/||p' | awk '{print $1}')
+    [ -n "$head_default" ] || die "cannot determine $head_repo's default branch"
+    [ "$branch" != "$head_default" ] \
+      || die "$branch IS $head_repo's default branch — refusing to rewrite it"
+  fi
+else
+  src=origin; base_src=origin; where=origin
+  # Ask the remote what its default branch is, rather than reading a local ref: this
+  # works in a bare or fresh clone that has no refs/remotes/* at all, and cannot go stale.
+  base_branch=$(git ls-remote --symref origin HEAD | sed -n 's|^ref: refs/heads/||p' | awk '{print $1}')
+  [ -n "$base_branch" ] || die "cannot determine origin's default branch"
+  branch=$target
+
+  # No branch named: offer the most recently pushed branches on origin. Fetched into
+  # refs/remotes/origin/* explicitly so this also works in a bare clone, which has none.
+  if [ -z "$branch" ]; then
+    [ -t 0 ] && [ -t 1 ] || die "no branch given, and no terminal to pick one from"
+    echo "fetching branches from origin…"
+    git fetch --quiet --prune origin '+refs/heads/*:refs/remotes/origin/*' \
+      || die "cannot fetch branches from origin"
+    names=(); labels=()
+    while IFS=$'\t' read -r name date author subject; do
+      case "$name" in "$base_branch" | HEAD) continue ;; esac
+      names+=("$name")
+      labels+=("$(printf '%-36.36s  %-14.14s  %-16.16s  %.40s' "$name" "$date" "$author" "$subject")")
+      [ "${#names[@]}" -lt "$recent" ] || break
+    done < <(git for-each-ref --sort=-committerdate \
+               --format='%(refname:lstrip=3)%09%(committerdate:relative)%09%(authorname)%09%(contents:subject)' \
+               refs/remotes/origin/)
+    [ "${#names[@]}" -gt 0 ] || die "origin has no branches other than $base_branch"
+    echo
+    echo "which branch to sign?  (${#names[@]} most recently pushed; tip author shown)"
+    menu "${labels[@]}"
+    branch=${names[$picked]}
+    echo
+  fi
+
+  [ "$branch" != "$base_branch" ] || die "$branch IS origin's default branch — refusing to rewrite it"
 fi
 
-[ "$branch" != "$default" ] || die "$branch IS origin's default branch — refusing to rewrite it"
-
-echo "fetching origin…"
+echo "fetching ${where}…"
 # FETCH_HEAD, not origin/<branch>: a bare clone has no remote-tracking refs, and it is
 # precisely the SHA just fetched — which is what the push lease below must pin. Fetch the
 # default branch first, since each fetch overwrites FETCH_HEAD.
-git fetch --quiet origin "$default" || die "cannot fetch origin/$default"
-default_sha=$(git rev-parse FETCH_HEAD^{commit})
-git fetch --quiet origin "$branch" || die "no branch '$branch' on origin"
+git fetch --quiet "$base_src" "$base_branch" || die "cannot fetch $base_branch"
+base_sha=$(git rev-parse FETCH_HEAD^{commit})
+git fetch --quiet "$src" "$branch" || die "no branch '$branch' on $where"
 head_sha=$(git rev-parse FETCH_HEAD^{commit})
 
 # The fork point, so only what this branch added is ever in scope.
-base=$(git merge-base "$default_sha" "$head_sha") || die "$branch shares no history with $default"
+base=$(git merge-base "$base_sha" "$head_sha") || die "$branch shares no history with $base_branch"
 [ "$(git rev-list --count "$base..$head_sha")" -gt 0 ] \
-  || die "$branch adds nothing on top of $default — nothing to do"
+  || die "$branch adds nothing on top of $base_branch — nothing to do"
 
-# The raw object is the signature check: `git log --format=%G?` only reports a *verified*
-# signature, which needs gpg.ssh.allowedSignersFile set, and its absence would otherwise
-# look identical to an unsigned commit.
-needs_fix() {
-  [ "$(git log -1 --format='%ae' "$1")" = "$me_email" ] || return 0
-  git cat-file commit "$1" | sed -n '/^$/q;p' | grep -q '^gpgsig ' || return 0
-  return 1
+# Prints the first commit in a range that CI would not accept as yours: anything but a good
+# signature (G) whose allowed_signers principal (%GS) is you. Carrying a signature is not
+# enough — a cloud agent's commit authored as you is signed by its container's key, which
+# only verifying against allowed_signers tells apart (U; CI says "No principal matched").
+# Verified with ssh-keygen, as CI does, rather than your signing program. awk reads to the
+# end so git never takes a SIGPIPE, which pipefail would turn into a failure.
+first_not_mine() {
+  git -c gpg.ssh.program=ssh-keygen -c gpg.ssh.allowedSignersFile="$allowed_signers" \
+    log --no-show-signature --reverse --format='%H %G? %GS' "$1" \
+    | awk -v me="$me_email" 'bad == "" && ($2 != "G" || $3 != me) { bad = $1 } END { print bad }'
 }
 
-first_bad=
-while read -r sha; do
-  if needs_fix "$sha"; then first_bad=$sha; break; fi
-done < <(git rev-list --reverse "$base..$head_sha")
-[ -n "$first_bad" ] \
-  || { echo "every commit on $branch is already authored and signed by you"; exit 0; }
+# A stacked PR whose base was rewritten still starts with the base's old commits; taking
+# them for its own is how a stack ends up carrying its base's work twice. So when the
+# branch has left its base's tip, look for a run of commits from the fork point that each
+# have a patch-equivalent on the base (=) and end at exactly the base tip's tree: those
+# are stale copies, and what follows is the branch's own work, which lands on the base tip
+# with every tree, and so every diff, unchanged.
+onto=
+if [ "$base" != "$base_sha" ]; then
+  base_tree=$(git rev-parse "$base_sha^{tree}")
+  while read -r mark sha tree; do
+    [ "$mark" = '=' ] || break
+    [ "$tree" != "$base_tree" ] || onto=$sha
+  done < <(git log --reverse --topo-order --cherry-mark --right-only --format='%m %H %T' \
+             "$base_sha...$head_sha")
+fi
 
-upstream=$(git rev-parse "$first_bad^")
+# $upstream is where the rebuilt range starts; $parent is what the rebuilt chain sits on.
+if [ -n "$onto" ]; then
+  [ "$onto" != "$head_sha" ] || die "$branch adds nothing on top of $base_branch — nothing to do"
+  # Every commit after the copies gets a new parent, so all of them are rebuilt.
+  upstream=$onto; parent=$base_sha
+else
+  first_bad=$(first_not_mine "$base..$head_sha") || die "cannot verify signatures on $branch"
+  [ -n "$first_bad" ] \
+    || { echo "every commit on $branch is already signed by you with a key in allowed_signers"; exit 0; }
+  upstream=$(git rev-parse "$first_bad^"); parent=$upstream
+fi
+
 echo
-echo "branch: $branch    forked from: $default    author: $me_name <$me_email>"
-if [ "$(git rev-list --count "$base..$upstream")" -gt 0 ]; then
+echo "branch: $where:$branch    forked from: $base_branch    author: $me_name <$me_email>"
+if [ -n "$onto" ]; then
+  echo "dropping, already on $base_branch:"
+  git log --reverse --format='    %h  %an  %s' "$base..$onto"
+elif [ "$(git rev-list --count "$base..$upstream")" -gt 0 ]; then
   echo "keeping untouched:"
   git log --reverse --format='    %h  %an  %s' "$base..$upstream"
 fi
-echo "rebuilding:"
+echo "rebuilding${onto:+ onto $base_branch}:"
 git log --reverse --format='    %h  %an  %s' "$upstream..$head_sha"
 echo
 
-if [ "$assume_yes" != 1 ]; then
-  printf 'rebuild and force-push to origin/%s? [y/N] ' "$branch"
+# --no-push only writes a local ref, so there is nothing to confirm.
+if [ "$assume_yes" != 1 ] && [ "$push" = 1 ]; then
+  printf 'rebuild and force-push to %s:%s? [y/N] ' "$where" "$branch"
   read -r reply
   case "$reply" in y | Y | yes | YES) ;; *) die "aborted" ;; esac
 fi
@@ -177,7 +299,7 @@ merge=$(git rev-list --merges "$upstream..$head_sha" | head -1)
 [ -z "$merge" ] \
   || die "$(git rev-parse --short "$merge") is a merge — rewrite this branch by hand"
 
-new=$upstream
+new=$parent
 while read -r sha; do
   orig_email=$(git log -1 --format='%ae' "$sha")
   trailer=()
@@ -185,9 +307,11 @@ while read -r sha; do
     trailer=(--trailer "Co-authored-by: $(git log -1 --format='%an' "$sha") <$orig_email>")
   fi
   # ${arr[@]+...} so an empty array is not an unbound-variable error under bash 3.2,
-  # which is still what macOS ships as /bin/bash.
+  # which is still what macOS ships as /bin/bash. addIfDifferent, not doNothing:
+  # --if-exists matches on the key alone, so doNothing dropped the original author
+  # whenever the message already had any Co-authored-by (an agent's, say).
   msg=$(git log -1 --format='%B' "$sha" \
-        | git interpret-trailers --if-exists doNothing ${trailer[@]+"${trailer[@]}"})
+        | git interpret-trailers --if-exists addIfDifferent ${trailer[@]+"${trailer[@]}"})
   new=$(
     export GIT_AUTHOR_NAME=$me_name GIT_AUTHOR_EMAIL=$me_email
     export GIT_AUTHOR_DATE=$(git log -1 --format='%aI' "$sha")
@@ -197,17 +321,33 @@ while read -r sha; do
   echo "    $(git rev-parse --short "$sha") -> $(git rev-parse --short "$new")  $(git log -1 --format=%s "$sha")"
 done < <(git rev-list --reverse "$upstream..$head_sha")
 
+# Hold the rebuilt chain to the same rule before it goes anywhere: if user.signingkey is
+# not the key allowed_signers lists for you, CI would reject every commit just made.
+unverified=$(first_not_mine "$parent..$new") || die "cannot verify the rebuilt commits"
+[ -z "$unverified" ] || die "rebuilt $(git rev-parse --short "$unverified") does not verify as $me_email \
+against $allowed_signers — is user.signingkey the key listed there for you? nothing pushed"
+
 # Park the chain on a ref so it survives gc, and so --no-push leaves something to look at.
 staging=refs/sign-branch/$branch
 git update-ref "$staging" "$new"
 
+# The lease names the full ref: with a URL rather than a remote there is no
+# remote-tracking ref for a short name to resolve against.
 if [ "$push" != 1 ]; then
   echo "not pushed (--no-push) — rebuilt chain at $staging ($(git rev-parse --short "$new"))"
-  echo "  inspect: git log $base..$staging"
-  echo "  push:    git push --force-with-lease=$branch:$head_sha origin $staging:refs/heads/$branch"
+  echo "  inspect: git log $base_sha..$staging"
+  echo "  push:    git push --force-with-lease=refs/heads/$branch:$head_sha $src $staging:refs/heads/$branch"
   exit 0
 fi
 
-git push --force-with-lease="$branch:$head_sha" origin "$new:refs/heads/$branch"
+git push --force-with-lease="refs/heads/$branch:$head_sha" "$src" "$new:refs/heads/$branch"
 git update-ref -d "$staging"
 echo "pushed — your local $branch is now behind; git fetch when you next need it"
+
+# Whatever is stacked on this branch is still built on the commits just replaced. Signing
+# it next restacks it. Nothing here is stacked on a fork's branch, so skip asking then.
+if [ "${cross:-false}" != true ] && command -v gh >/dev/null; then
+  stacked=$(gh pr list ${base_repo:+-R "$host/$base_repo"} --base "$branch" --state open \
+              --json number --jq 'map("#\(.number)") | join(" ")' 2>/dev/null) || stacked=
+  [ -z "$stacked" ] || echo "stacked on $branch and still on its old commits: $stacked — sign those next"
+fi
