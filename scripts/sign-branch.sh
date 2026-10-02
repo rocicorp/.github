@@ -47,6 +47,12 @@
 # you keep their SHA and their completed checks. Merges are refused rather than flattened.
 # It force-pushes, with the lease pinned to the SHA it fetched, so it asks first unless
 # you pass --yes.
+#
+# A stacked PR whose base branch has been rewritten since (signed with this, say) still
+# starts with that base's old commits. They are dropped, and the PR's own commits rebuilt
+# onto the base's tip, when each has a patch-equivalent there and the last has exactly the
+# base tip's tree, so every rebuilt commit keeps its tree and diff. Sign a stack from the
+# bottom up: after a push it names the PRs stacked on the branch, which need signing next.
 set -euo pipefail
 
 self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
@@ -239,18 +245,44 @@ first_not_mine() {
     | awk -v me="$me_email" 'bad == "" && ($2 != "G" || $3 != me) { bad = $1 } END { print bad }'
 }
 
-first_bad=$(first_not_mine "$base..$head_sha") || die "cannot verify signatures on $branch"
-[ -n "$first_bad" ] \
-  || { echo "every commit on $branch is already signed by you with a key in allowed_signers"; exit 0; }
+# A stacked PR whose base was rewritten still starts with the base's old commits; taking
+# them for its own is how a stack ends up carrying its base's work twice. So when the
+# branch has left its base's tip, look for a run of commits from the fork point that each
+# have a patch-equivalent on the base (=) and end at exactly the base tip's tree: those
+# are stale copies, and what follows is the branch's own work, which lands on the base tip
+# with every tree, and so every diff, unchanged.
+onto=
+if [ "$base" != "$base_sha" ]; then
+  base_tree=$(git rev-parse "$base_sha^{tree}")
+  while read -r mark sha tree; do
+    [ "$mark" = '=' ] || break
+    [ "$tree" != "$base_tree" ] || onto=$sha
+  done < <(git log --reverse --topo-order --cherry-mark --right-only --format='%m %H %T' \
+             "$base_sha...$head_sha")
+fi
 
-upstream=$(git rev-parse "$first_bad^")
+# $upstream is where the rebuilt range starts; $parent is what the rebuilt chain sits on.
+if [ -n "$onto" ]; then
+  [ "$onto" != "$head_sha" ] || die "$branch adds nothing on top of $base_branch — nothing to do"
+  # Every commit after the copies gets a new parent, so all of them are rebuilt.
+  upstream=$onto; parent=$base_sha
+else
+  first_bad=$(first_not_mine "$base..$head_sha") || die "cannot verify signatures on $branch"
+  [ -n "$first_bad" ] \
+    || { echo "every commit on $branch is already signed by you with a key in allowed_signers"; exit 0; }
+  upstream=$(git rev-parse "$first_bad^"); parent=$upstream
+fi
+
 echo
 echo "branch: $where:$branch    forked from: $base_branch    author: $me_name <$me_email>"
-if [ "$(git rev-list --count "$base..$upstream")" -gt 0 ]; then
+if [ -n "$onto" ]; then
+  echo "dropping, already on $base_branch:"
+  git log --reverse --format='    %h  %an  %s' "$base..$onto"
+elif [ "$(git rev-list --count "$base..$upstream")" -gt 0 ]; then
   echo "keeping untouched:"
   git log --reverse --format='    %h  %an  %s' "$base..$upstream"
 fi
-echo "rebuilding:"
+echo "rebuilding${onto:+ onto $base_branch}:"
 git log --reverse --format='    %h  %an  %s' "$upstream..$head_sha"
 echo
 
@@ -267,7 +299,7 @@ merge=$(git rev-list --merges "$upstream..$head_sha" | head -1)
 [ -z "$merge" ] \
   || die "$(git rev-parse --short "$merge") is a merge — rewrite this branch by hand"
 
-new=$upstream
+new=$parent
 while read -r sha; do
   orig_email=$(git log -1 --format='%ae' "$sha")
   trailer=()
@@ -291,7 +323,7 @@ done < <(git rev-list --reverse "$upstream..$head_sha")
 
 # Hold the rebuilt chain to the same rule before it goes anywhere: if user.signingkey is
 # not the key allowed_signers lists for you, CI would reject every commit just made.
-unverified=$(first_not_mine "$upstream..$new") || die "cannot verify the rebuilt commits"
+unverified=$(first_not_mine "$parent..$new") || die "cannot verify the rebuilt commits"
 [ -z "$unverified" ] || die "rebuilt $(git rev-parse --short "$unverified") does not verify as $me_email \
 against $allowed_signers — is user.signingkey the key listed there for you? nothing pushed"
 
@@ -303,7 +335,7 @@ git update-ref "$staging" "$new"
 # remote-tracking ref for a short name to resolve against.
 if [ "$push" != 1 ]; then
   echo "not pushed (--no-push) — rebuilt chain at $staging ($(git rev-parse --short "$new"))"
-  echo "  inspect: git log $base..$staging"
+  echo "  inspect: git log $base_sha..$staging"
   echo "  push:    git push --force-with-lease=refs/heads/$branch:$head_sha $src $staging:refs/heads/$branch"
   exit 0
 fi
@@ -311,3 +343,11 @@ fi
 git push --force-with-lease="refs/heads/$branch:$head_sha" "$src" "$new:refs/heads/$branch"
 git update-ref -d "$staging"
 echo "pushed — your local $branch is now behind; git fetch when you next need it"
+
+# Whatever is stacked on this branch is still built on the commits just replaced. Signing
+# it next restacks it. Nothing here is stacked on a fork's branch, so skip asking then.
+if [ "${cross:-false}" != true ] && command -v gh >/dev/null; then
+  stacked=$(gh pr list ${base_repo:+-R "$host/$base_repo"} --base "$branch" --state open \
+              --json number --jq 'map("#\(.number)") | join(" ")' 2>/dev/null) || stacked=
+  [ -z "$stacked" ] || echo "stacked on $branch and still on its old commits: $stacked — sign those next"
+fi
