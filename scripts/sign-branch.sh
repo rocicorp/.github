@@ -41,11 +41,12 @@
 # be rewritten. That fork point is derived (`ls-remote --symref` for the default branch,
 # or the PR's base, then `merge-base`), never asked for.
 #
-# Within that range it starts at the FIRST commit that needs rebuilding — one whose author
-# is not you, or that carries no signature — and runs to the tip, so commits already
-# authored and signed by you keep their SHA and their completed checks. Merges are refused
-# rather than flattened. It force-pushes, with the lease pinned to the SHA it fetched, so
-# it asks first unless you pass --yes.
+# Within that range it starts at the FIRST commit that needs rebuilding — one CI would not
+# accept as yours: anything but a good signature whose principal in this clone's
+# allowed_signers is your user.email — and runs to the tip, so commits already signed by
+# you keep their SHA and their completed checks. Merges are refused rather than flattened.
+# It force-pushes, with the lease pinned to the SHA it fetched, so it asks first unless
+# you pass --yes.
 set -euo pipefail
 
 self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
@@ -84,6 +85,9 @@ git config --get user.signingkey >/dev/null \
 [ "$(git config --default openpgp --get gpg.format)" = ssh ] \
   || die "gpg.format is not 'ssh' — allowed_signers only accepts SSH signatures:
     git config --global gpg.format ssh"
+# The allow-list CI verifies against, from this clone (scripts/ sits at its root).
+allowed_signers=$(dirname "$(dirname "$self")")/.github/signing/allowed_signers
+[ -f "$allowed_signers" ] || die "cannot find $allowed_signers"
 
 # Arrow-key menu on the terminal: sets $picked to the chosen index. Up/Down or k/j move,
 # a digit jumps, Enter picks, q or Esc aborts. Redraws in place with plain escapes so it
@@ -223,21 +227,21 @@ base=$(git merge-base "$base_sha" "$head_sha") || die "$branch shares no history
 [ "$(git rev-list --count "$base..$head_sha")" -gt 0 ] \
   || die "$branch adds nothing on top of $base_branch — nothing to do"
 
-# The raw object is the signature check: `git log --format=%G?` only reports a *verified*
-# signature, which needs gpg.ssh.allowedSignersFile set, and its absence would otherwise
-# look identical to an unsigned commit.
-needs_fix() {
-  [ "$(git log -1 --format='%ae' "$1")" = "$me_email" ] || return 0
-  git cat-file commit "$1" | sed -n '/^$/q;p' | grep -q '^gpgsig ' || return 0
-  return 1
+# Prints the first commit in a range that CI would not accept as yours: anything but a good
+# signature (G) whose allowed_signers principal (%GS) is you. Carrying a signature is not
+# enough — a cloud agent's commit authored as you is signed by its container's key, which
+# only verifying against allowed_signers tells apart (U; CI says "No principal matched").
+# Verified with ssh-keygen, as CI does, rather than your signing program. awk reads to the
+# end so git never takes a SIGPIPE, which pipefail would turn into a failure.
+first_not_mine() {
+  git -c gpg.ssh.program=ssh-keygen -c gpg.ssh.allowedSignersFile="$allowed_signers" \
+    log --no-show-signature --reverse --format='%H %G? %GS' "$1" \
+    | awk -v me="$me_email" 'bad == "" && ($2 != "G" || $3 != me) { bad = $1 } END { print bad }'
 }
 
-first_bad=
-while read -r sha; do
-  if needs_fix "$sha"; then first_bad=$sha; break; fi
-done < <(git rev-list --reverse "$base..$head_sha")
+first_bad=$(first_not_mine "$base..$head_sha") || die "cannot verify signatures on $branch"
 [ -n "$first_bad" ] \
-  || { echo "every commit on $branch is already authored and signed by you"; exit 0; }
+  || { echo "every commit on $branch is already signed by you with a key in allowed_signers"; exit 0; }
 
 upstream=$(git rev-parse "$first_bad^")
 echo
@@ -284,6 +288,12 @@ while read -r sha; do
   )
   echo "    $(git rev-parse --short "$sha") -> $(git rev-parse --short "$new")  $(git log -1 --format=%s "$sha")"
 done < <(git rev-list --reverse "$upstream..$head_sha")
+
+# Hold the rebuilt chain to the same rule before it goes anywhere: if user.signingkey is
+# not the key allowed_signers lists for you, CI would reject every commit just made.
+unverified=$(first_not_mine "$upstream..$new") || die "cannot verify the rebuilt commits"
+[ -z "$unverified" ] || die "rebuilt $(git rev-parse --short "$unverified") does not verify as $me_email \
+against $allowed_signers — is user.signingkey the key listed there for you? nothing pushed"
 
 # Park the chain on a ref so it survives gc, and so --no-push leaves something to look at.
 staging=refs/sign-branch/$branch
